@@ -1,12 +1,12 @@
 {
-  "name": "PuntoNexo POS",
-  "short_name": "PuntoNexo",
+  "name": "7 Chakras",
+  "short_name": "7 Chakras",
   "description": "Sistema web para punto de venta, inventario, caja y reportes.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#f8fafc",
-  "theme_color": "#0f766e",
+  "background_color": "#ffffff",
+  "theme_color": "#8b1cf6",
   "orientation": "portrait-primary",
   "icons": [
     {
