@@ -831,6 +831,7 @@ function showChargeModal() {
     <h2>Cobrar venta</h2>
     <p>Total a cobrar: <strong>${money.format(total)}</strong></p>
     <form id="charge-form" class="stack">
+      <label>Folio de nota / ticket <input name="ticketFolio" required placeholder="Ej. 000123"></label>
       <label>Forma de pago
         <select name="paymentMethod" id="payment-method">
           <option value="efectivo">Efectivo</option>
@@ -858,11 +859,70 @@ function showChargeModal() {
     const data = Object.fromEntries(new FormData(event.target));
     const paid = data.paymentMethod === "efectivo" ? Number(data.paid) : total;
     if (data.paymentMethod === "efectivo" && paid < total) return toast("El pago recibido es menor al total");
-    completeSale(paid, data.paymentMethod);
+    validateSaleFolio(paid, data.paymentMethod, data.ticketFolio);
   });
 }
 
-function completeSale(paid, paymentMethod = "efectivo") {
+function validateSaleFolio(paid, paymentMethod, ticketFolio) {
+  const folio = ticketFolio.trim();
+  const cash = openCash();
+  const duplicated = state.sales.find(sale => sale.status !== "cancelada" && (sale.ticketFolio || "").trim().toLowerCase() === folio.toLowerCase());
+  if (!duplicated) {
+    completeSale(paid, paymentMethod, folio);
+    return;
+  }
+  if (duplicated.cashId !== cash?.id) {
+    showModal(`
+      <h2>Folio ya utilizado</h2>
+      <p>La nota <strong>${escapeHtml(folio)}</strong> ya pertenece a otra caja o a un corte anterior.</p>
+      <p class="muted">Para continuar debes modificar el folio de la venta actual.</p>
+      <div class="actions"><button class="primary" id="change-duplicate-folio">Modificar folio</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
+    `);
+    document.querySelector("#change-duplicate-folio").addEventListener("click", showChargeModal);
+    return;
+  }
+  showDuplicateFolioModal(duplicated, paid, paymentMethod, folio);
+}
+
+function showDuplicateFolioModal(existingSale, paid, paymentMethod, folio) {
+  showModal(`
+    <h2>Folio ya registrado</h2>
+    <p>La nota <strong>${escapeHtml(folio)}</strong> ya existe en esta caja.</p>
+    <div class="panel compact">
+      <p>Total actual: <strong>${money.format(existingSale.total)}</strong></p>
+      <p>Vendedor: ${userName(existingSale.userId)} | Hora: ${existingSale.time}</p>
+    </div>
+    <p class="muted">Si el cliente regreso por otro producto, puedes agregar esta venta al mismo folio con autorizacion de supervisor/admin.</p>
+    <div class="actions">
+      <button class="primary" id="append-existing-folio">Agregar a este folio</button>
+      <button class="secondary" id="change-existing-folio">Modificar folio</button>
+      <button type="button" class="ghost" data-close-modal>Cancelar</button>
+    </div>
+  `);
+  document.querySelector("#append-existing-folio").addEventListener("click", () => {
+    authorizeModal("Autorizar agregado a folio existente", authUser => {
+      completeSale(paid, paymentMethod, folio, { appendToSaleId: existingSale.id, authorizedBy: authUser });
+    });
+  });
+  document.querySelector("#change-existing-folio").addEventListener("click", showChargeModal);
+}
+
+function salePayments(sale) {
+  if (Array.isArray(sale.payments) && sale.payments.length) return sale.payments;
+  const method = sale.paymentMethod || "efectivo";
+  return [{ method, amount: sale.total || 0, paid: sale.paid ?? sale.total ?? 0, change: sale.change || 0, time: sale.time }];
+}
+
+function salePaymentAmount(sale, method) {
+  return salePayments(sale).filter(payment => payment.method === method).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+}
+
+function paymentLabel(sale) {
+  const methods = [...new Set(salePayments(sale).map(payment => payment.method))];
+  return methods.length === 1 ? methods[0] : "mixto";
+}
+
+function completeSale(paid, paymentMethod = "efectivo", ticketFolio = "", options = {}) {
   const cash = openCash();
   const account = currentAccount();
   const items = account.items.map(line => {
@@ -888,21 +948,42 @@ function completeSale(paid, paymentMethod = "efectivo") {
     };
   });
   const total = items.reduce((sum, item) => sum + item.subtotal, 0);
-  const sale = {
-    id: uid("sale"),
-    date: today(),
-    time: nowTime(),
-    createdAt: nowIso(),
-    userId: session.userId,
-    cashId: cash.id,
-    total,
-    paid,
-    change: paid - total,
-    paymentMethod,
-    status: "completada",
-    items
-  };
-  state.sales.unshift(sale);
+  const payment = { method: paymentMethod, amount: total, paid, change: paid - total, time: nowTime() };
+  let sale = null;
+  if (options.appendToSaleId) {
+    sale = state.sales.find(item => item.id === options.appendToSaleId);
+    if (!sale || sale.cashId !== cash.id || sale.status === "cancelada") return toast("No se puede agregar a ese folio");
+    if (!Array.isArray(sale.payments) || !sale.payments.length) {
+      sale.payments = [{ method: sale.paymentMethod || "efectivo", amount: sale.total || 0, paid: sale.paid ?? sale.total ?? 0, change: sale.change || 0, time: sale.time }];
+    }
+    sale.items.push(...items);
+    sale.total += total;
+    sale.paid = (sale.paid || 0) + paid;
+    sale.change = (sale.change || 0) + payment.change;
+    sale.payments.push(payment);
+    sale.paymentMethod = paymentLabel(sale);
+    sale.updatedAt = nowIso();
+    sale.appendAuthorizations = sale.appendAuthorizations || [];
+    sale.appendAuthorizations.push({ userId: session.userId, authorizedBy: options.authorizedBy?.id, date: today(), time: nowTime(), amount: total });
+  } else {
+    sale = {
+      id: uid("sale"),
+      date: today(),
+      time: nowTime(),
+      createdAt: nowIso(),
+      userId: session.userId,
+      cashId: cash.id,
+      ticketFolio: ticketFolio.trim(),
+      total,
+      paid,
+      change: paid - total,
+      paymentMethod,
+      payments: [payment],
+      status: "completada",
+      items
+    };
+    state.sales.unshift(sale);
+  }
   items.forEach(item => {
     const product = state.products.find(p => p.id === item.productId);
     const before = product.units;
@@ -910,12 +991,16 @@ function completeSale(paid, paymentMethod = "efectivo") {
     addMovement(product, "Salida por venta", before, -item.stockQty, product.units, sale.id);
     notifyLowStockOnce(product);
   });
-  logOperation("venta", "sales", sale.id, `Venta por ${money.format(total)} pagada con ${paymentMethod}`);
+  if (options.appendToSaleId) {
+    logOperation("venta_agregada_folio", "sales", sale.id, `Venta agregada al folio ${sale.ticketFolio || "sin folio"} por ${money.format(total)} autorizada por ${options.authorizedBy?.name || "supervisor/admin"}`);
+  } else {
+    logOperation("venta", "sales", sale.id, `Venta folio ${sale.ticketFolio || "sin folio"} por ${money.format(total)} pagada con ${paymentMethod}`);
+  }
   account.items = [];
   closeModal();
   saveState();
   saveSession();
-  toast(`Venta registrada. Cambio: ${money.format(sale.change)}`);
+  toast(options.appendToSaleId ? `Productos agregados al folio ${sale.ticketFolio}` : `Venta registrada. Cambio: ${money.format(payment.change)}`);
   render();
 }
 
@@ -1238,7 +1323,7 @@ function drawSales() {
   const date = document.querySelector("#sales-date").value;
   const search = document.querySelector("#sales-search").value.toLowerCase();
   const sales = visibleSales().filter(sale => sale.date === date).filter(sale => {
-    const text = `${sale.id} ${userName(sale.userId)} ${sale.items.map(item => item.name).join(" ")}`.toLowerCase();
+    const text = `${sale.id} ${sale.ticketFolio || ""} ${userName(sale.userId)} ${sale.items.map(item => item.name).join(" ")}`.toLowerCase();
     return text.includes(search);
   });
   document.querySelector("#sales-table").innerHTML = salesTable(sales, true);
@@ -1256,9 +1341,9 @@ function visibleSales() {
 
 function salesTable(sales, actions) {
   if (!sales.length) return `<p class="empty">No hay ventas para mostrar.</p>`;
-  return `<div class="table-wrap"><table><thead><tr><th>Folio</th><th>Fecha</th><th>Hora</th><th>Vendedor</th><th>Total</th><th>Estado</th>${actions ? "<th>Acciones</th>" : ""}</tr></thead>
+  return `<div class="table-wrap"><table><thead><tr><th>Venta</th><th>Nota</th><th>Fecha</th><th>Hora</th><th>Vendedor</th><th>Total</th><th>Estado</th>${actions ? "<th>Acciones</th>" : ""}</tr></thead>
     <tbody>${sales.map(sale => `<tr>
-      <td>${sale.id.slice(0, 12)}</td><td>${sale.date}</td><td>${sale.time}</td><td>${userName(sale.userId)}</td><td>${money.format(sale.total)}<br><small class="muted">${sale.paymentMethod || "efectivo"}</small></td><td><span class="badge ${sale.status === "cancelada" ? "danger" : sale.status === "parcialmente devuelta" ? "warn" : "ok"}">${sale.status}</span></td>
+      <td>${sale.id.slice(0, 12)}</td><td>${escapeHtml(sale.ticketFolio || "-")}</td><td>${sale.date}</td><td>${sale.time}</td><td>${userName(sale.userId)}</td><td>${money.format(sale.total)}<br><small class="muted">${paymentLabel(sale)}</small></td><td><span class="badge ${sale.status === "cancelada" ? "danger" : sale.status === "parcialmente devuelta" ? "warn" : "ok"}">${sale.status}</span></td>
       ${actions ? `<td><div class="actions"><button class="tiny" data-view-sale="${sale.id}">Ver</button><button class="tiny warning" data-return-sale="${sale.id}" ${sale.status === "cancelada" ? "disabled" : ""}>Devolucion</button>${can("admin", "supervisor") ? `<button class="tiny danger" data-cancel-sale="${sale.id}" ${sale.status === "cancelada" ? "disabled" : ""}>Cancelar</button>` : ""}</div></td>` : ""}
     </tr>`).join("")}</tbody></table></div>`;
 }
@@ -1269,7 +1354,7 @@ function saleDetailModal(saleId) {
   showModal(`
     <h2>Detalle de venta</h2>
     <p>Folio: ${sale.id}</p>
-    <p>Vendedor: ${userName(sale.userId)} | Fecha: ${sale.date} ${sale.time} | Pago: ${sale.paymentMethod || "efectivo"}</p>
+    <p>Nota/ticket: ${escapeHtml(sale.ticketFolio || "-")} | Vendedor: ${userName(sale.userId)} | Fecha: ${sale.date} ${sale.time} | Pago: ${paymentLabel(sale)}</p>
     <div class="table-wrap"><table><thead><tr><th>Producto</th><th>Presentacion</th><th>Cant.</th><th>Descuento stock</th>${sellerView ? "" : "<th>Costo total</th>"}<th>Venta</th><th>Total</th>${sellerView ? "" : "<th>Ganancia</th>"}</tr></thead>
     <tbody>${sale.items.map(item => `<tr><td>${item.name}</td><td>${item.optionName || "Unidad"}</td><td>${item.qty}</td><td>${item.stockQty || item.qty}</td>${sellerView ? "" : `<td>${money.format(item.costTotal ?? item.cost * item.qty)}</td>`}<td>${money.format(item.price)}</td><td>${money.format(item.subtotal)}</td>${sellerView ? "" : `<td>${money.format(item.profit)}</td>`}</tr>`).join("")}</tbody></table></div>
     <button class="ghost" data-close-modal>Cerrar</button>
@@ -1409,13 +1494,14 @@ function cashSummary(cash) {
   const sales = state.sales.filter(sale => sale.cashId === cash.id && sale.status !== "cancelada");
   const expenses = state.expenses.filter(expense => expense.cashId === cash.id);
   const sold = sales.reduce((sum, sale) => sum + sale.total, 0);
-  const cashSold = sales.filter(sale => (sale.paymentMethod || "efectivo") === "efectivo").reduce((sum, sale) => sum + sale.total, 0);
-  const cardSold = sales.filter(sale => sale.paymentMethod === "tarjeta").reduce((sum, sale) => sum + sale.total, 0);
-  const transferSold = sales.filter(sale => sale.paymentMethod === "transferencia").reduce((sum, sale) => sum + sale.total, 0);
+  const cashSold = sales.reduce((sum, sale) => sum + salePaymentAmount(sale, "efectivo"), 0);
+  const cardSold = sales.reduce((sum, sale) => sum + salePaymentAmount(sale, "tarjeta"), 0);
+  const transferSold = sales.reduce((sum, sale) => sum + salePaymentAmount(sale, "transferencia"), 0);
   const ticketSold = cardSold + transferSold;
   const spent = expenses.reduce((sum, expense) => sum + expense.amount, 0);
   const expected = cash.initialAmount + cashSold - spent;
   const expectedWithTickets = expected + ticketSold;
+  const noteRows = sales.map(sale => `<tr><td>${escapeHtml(sale.ticketFolio || "-")}</td><td>${sale.time}</td><td>${paymentLabel(sale)}</td><td>${money.format(sale.total)}</td></tr>`).join("");
   return `
     <div class="grid cols-3">
       ${metric("Monto inicial", money.format(cash.initialAmount))}
@@ -1428,14 +1514,19 @@ function cashSummary(cash) {
       ${metric("Esperado en caja", money.format(expected))}
       ${metric("Cuadre con tickets", money.format(expectedWithTickets))}
     </div>
+    <div class="panel">
+      <h3>Notas registradas en esta caja</h3>
+      ${sales.length ? `<div class="table-wrap"><table><thead><tr><th>Nota</th><th>Hora</th><th>Pago</th><th>Total</th></tr></thead><tbody>${noteRows}</tbody></table></div>` : `<p class="empty">No hay notas registradas.</p>`}
+    </div>
     <button class="primary" id="close-cash">Cerrar caja / corte</button>
   `;
 }
 
 function closeCash() {
   const cash = openCash();
-  const sales = state.sales.filter(sale => sale.cashId === cash.id && sale.status !== "cancelada" && (sale.paymentMethod || "efectivo") === "efectivo").reduce((sum, sale) => sum + sale.total, 0);
-  const ticketSales = state.sales.filter(sale => sale.cashId === cash.id && sale.status !== "cancelada" && ["tarjeta", "transferencia"].includes(sale.paymentMethod)).reduce((sum, sale) => sum + sale.total, 0);
+  const currentSales = state.sales.filter(sale => sale.cashId === cash.id && sale.status !== "cancelada");
+  const sales = currentSales.reduce((sum, sale) => sum + salePaymentAmount(sale, "efectivo"), 0);
+  const ticketSales = currentSales.reduce((sum, sale) => sum + salePaymentAmount(sale, "tarjeta") + salePaymentAmount(sale, "transferencia"), 0);
   const expenses = state.expenses.filter(expense => expense.cashId === cash.id).reduce((sum, expense) => sum + expense.amount, 0);
   cash.status = "cerrada";
   cash.dateClose = today();
@@ -1464,7 +1555,7 @@ function drawReports() {
   const date = document.querySelector("#report-date").value;
   const sales = state.sales.filter(sale => sale.date === date && sale.status !== "cancelada");
   const expenses = state.expenses.filter(expense => expense.date === date);
-  const rows = sales.flatMap(sale => sale.items.map(item => ({ type: `producto/${sale.paymentMethod || "efectivo"}`, date: sale.date, time: sale.time, name: `${item.name} (${item.optionName || "Unidad"})`, qty: item.qty, cost: item.costTotal ?? item.cost * item.qty, sold: item.subtotal, profit: item.profit })));
+  const rows = sales.flatMap(sale => sale.items.map(item => ({ type: `producto/${sale.paymentMethod || "efectivo"}`, date: sale.date, time: sale.time, name: `${item.name} (${item.optionName || "Unidad"}) - Nota ${sale.ticketFolio || "-"}`, qty: item.qty, cost: item.costTotal ?? item.cost * item.qty, sold: item.subtotal, profit: item.profit })));
   expenses.forEach(expense => rows.push({ type: "gasto", date: expense.date, time: expense.time, name: expense.description, qty: 1, cost: 0, sold: -expense.amount, profit: -expense.amount }));
   const totals = rows.reduce((acc, row) => {
     acc.cost += row.cost;
