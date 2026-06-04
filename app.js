@@ -632,13 +632,14 @@ function renderPos(root) {
   if (!cash) {
     root.innerHTML = `
       <div class="panel">
-        <h2>Abre caja para comenzar a vender</h2>
-        <form id="open-cash-form" class="toolbar">
-          <label>Monto inicial <input name="amount" type="number" min="0" step="0.01" required></label>
-          <button class="primary compact">Abrir caja</button>
-        </form>
+        <h2>Caja requerida</h2>
+        <p class="muted">Para realizar ventas primero debes abrir caja desde el modulo Caja.</p>
+        <button class="primary compact" id="go-cash">Ir a Caja</button>
       </div>`;
-    document.querySelector("#open-cash-form").addEventListener("submit", handleOpenCash);
+    document.querySelector("#go-cash").addEventListener("click", () => {
+      currentView = "cash";
+      render();
+    });
     return;
   }
   ensureAccounts();
