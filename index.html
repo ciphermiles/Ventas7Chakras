@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PuntoNexo POS</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="cloud-config.js"></script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <template id="login-template">
+    <main class="login-shell">
+      <section class="login-card">
+        <div>
+          <p class="eyebrow">NexoDigital Soluciones</p>
+          <h1>PuntoNexo POS</h1>
+          <p class="muted">Aplicacion web autogestionable para ventas, inventario, caja, reportes y contenido comercial.</p>
+        </div>
+        <form id="login-form" class="stack">
+          <label>
+            Usuario
+            <input name="username" autocomplete="username" required placeholder="admin">
+          </label>
+          <label>
+            Contraseña
+            <input name="password" type="password" autocomplete="current-password" required placeholder="Contraseña">
+          </label>
+          <button class="primary" type="submit">Entrar</button>
+          <p class="hint">
+            Acceso restringido a usuarios autorizados.
+          </p>
+        </form>
+      </section>
+    </main>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
