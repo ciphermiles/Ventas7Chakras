@@ -3,6 +3,36 @@
 const STORAGE_KEY = "tienda_pos_mac_fes_acatlan_v1";
 const app = document.querySelector("#app");
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" });
+
+const VIEW_ACCESS = [
+  { id: "dashboard", label: "Dashboard" },
+  { id: "pos", label: "Punto de venta" },
+  { id: "inventory", label: "Productos" },
+  { id: "expenses", label: "Gastos" },
+  { id: "sales", label: "Ventas" },
+  { id: "cash", label: "Caja" },
+  { id: "reports", label: "Reportes" },
+  { id: "authorizations", label: "Autorizaciones" },
+  { id: "site", label: "Sitio" },
+  { id: "users", label: "Usuarios" },
+  { id: "backup", label: "Respaldos" }
+];
+
+const DEFAULT_ACCESS = {
+  master: Object.fromEntries(VIEW_ACCESS.map(item => [item.id, true])),
+  admin: {
+    dashboard: true, pos: true, inventory: true, expenses: true, sales: true, cash: true,
+    reports: true, authorizations: true, site: true, users: true, backup: true
+  },
+  supervisor: {
+    dashboard: true, pos: true, inventory: true, expenses: true, sales: true, cash: true,
+    reports: true, authorizations: true, site: false, users: false, backup: false
+  },
+  vendedor: {
+    dashboard: false, pos: true, inventory: false, expenses: true, sales: true, cash: true,
+    reports: false, authorizations: false, site: false, users: false, backup: false
+  }
+};
 const clientId = sessionStorage.getItem("posClientId") || uid("client");
 sessionStorage.setItem("posClientId", clientId);
 const serverMode = location.protocol === "http:" || location.protocol === "https:";
@@ -83,8 +113,25 @@ function normalizeState(data) {
   data.backups = data.backups || [];
   data.authTokens = data.authTokens || [];
   data.settings.authorizationPin = data.settings.authorizationPin || "4321";
+  data.users = ensureMasterUser(data.users.map(normalizeUser));
   data.products = data.products.map(normalizeProduct);
   return data;
+}
+
+function normalizeUser(user) {
+  user.role = user.role || "vendedor";
+  if (user.role === "owner") user.role = "master";
+  user.active = user.active !== false;
+  user.access = { ...defaultAccessForRole(user.role), ...(user.access || {}) };
+  if (user.role === "master") user.access = { ...DEFAULT_ACCESS.master };
+  return user;
+}
+
+function ensureMasterUser(users) {
+  if (!users.some(user => user.role === "master" || user.isMaster)) {
+    users.unshift(normalizeUser({ id: uid("usr"), name: "Dueno del sistema", username: "master", password: "master123", role: "master", active: true }));
+  }
+  return users;
 }
 
 function normalizeProduct(product) {
@@ -267,6 +314,7 @@ function requestAccessKey() {
 }
 
 function seedState() {
+  const master = uid("usr");
   const admin = uid("usr");
   const supervisor1 = uid("usr");
   const supervisor2 = uid("usr");
@@ -289,6 +337,7 @@ function seedState() {
     },
     announcements: [],
     users: [
+      { id: master, name: "Dueno del sistema", username: "master", password: "master123", role: "master", active: true, access: { ...DEFAULT_ACCESS.master } },
       { id: admin, name: "Omar", username: "admin", password: "adminO123", role: "admin", active: true },
       { id: supervisor1, name: "Sonia", username: "supervisor1", password: "super1123", role: "supervisor", active: true },
       { id: supervisor2, name: "Toño F", username: "supervisor2", password: "super2123", role: "supervisor", active: true },
@@ -330,6 +379,35 @@ function currentUser() {
   return state.users.find(user => user.id === session?.userId);
 }
 
+function defaultAccessForRole(role) {
+  return { ...(DEFAULT_ACCESS[role] || DEFAULT_ACCESS.vendedor) };
+}
+
+function isMaster(user = currentUser()) {
+  return user?.role === "master" || user?.isMaster;
+}
+
+function roleLabel(role) {
+  return ({ master: "Dueno/Master", admin: "Administrador", supervisor: "Supervisor", vendedor: "Vendedor" })[role] || role;
+}
+
+function canAccess(viewId, user = currentUser()) {
+  if (!user?.active) return false;
+  if (isMaster(user)) return true;
+  const access = { ...defaultAccessForRole(user.role), ...(user.access || {}) };
+  return Boolean(access[viewId]);
+}
+
+function canEditUser(targetUser) {
+  const actor = currentUser();
+  if (!actor || !targetUser) return false;
+  if (isMaster(targetUser) && targetUser.id !== actor.id) return false;
+  if (isMaster(actor)) return true;
+  if (actor.role !== "admin" || !canAccess("users", actor)) return false;
+  if (isMaster(targetUser) || targetUser.role === "admin" || targetUser.role === "master") return false;
+  return true;
+}
+
 function userName(id) {
   return state.users.find(user => user.id === id)?.name || "Sistema";
 }
@@ -348,13 +426,13 @@ function unitLabel(product, qty = product.units) {
 
 function saleOptions(product) {
   const options = [
-    { id: "base", name: product.stockUnit === "pieza" ? "Unidad" : `Venta por ${product.stockUnit}`, quantity: 1, price: Number(product.price || 0) }
+    { id: "base", name: product.stockUnit === "pieza" ? "Por pieza" : `Por ${product.stockUnit}`, quantity: 1, price: Number(product.price || 0) }
   ];
   if (product.packageUnits > 1 && product.packagePrice > 0) {
-    options.push({ id: "package", name: `Paquete de ${product.packageUnits}`, quantity: Number(product.packageUnits), price: Number(product.packagePrice) });
+    options.push({ id: "package", name: `Paquete/caja de ${product.packageUnits}`, quantity: Number(product.packageUnits), price: Number(product.packagePrice) });
   }
   if (product.wholesaleMin > 1 && product.wholesalePrice > 0) {
-    options.push({ id: "wholesale", name: `Mayoreo desde ${product.wholesaleMin}`, quantity: 1, price: Number(product.wholesalePrice), minQty: Number(product.wholesaleMin) });
+    options.push({ id: "wholesale", name: `Precio especial desde ${product.wholesaleMin}`, quantity: 1, price: Number(product.wholesalePrice), minQty: Number(product.wholesaleMin) });
   }
   return options;
 }
@@ -405,7 +483,9 @@ function convertStockInput(product, receiptType, qty, unitsPerContainer) {
 }
 
 function can(...roles) {
-  return roles.includes(currentUser()?.role);
+  const user = currentUser();
+  if (isMaster(user)) return true;
+  return roles.includes(user?.role);
 }
 
 function openCash() {
@@ -451,21 +531,20 @@ function validateAuthorizationCode(code) {
 }
 
 function navItems() {
-  const role = currentUser().role;
   const items = [
-    { id: "dashboard", label: "Dashboard", roles: ["admin", "supervisor"] },
-    { id: "pos", label: "Punto de venta", roles: ["admin", "supervisor", "vendedor"] },
-    { id: "inventory", label: "Inventario", roles: ["admin", "supervisor"] },
-    { id: "expenses", label: "Gastos", roles: ["admin", "supervisor", "vendedor"] },
-    { id: "sales", label: "Ventas", roles: ["admin", "supervisor", "vendedor"] },
-    { id: "cash", label: "Caja", roles: ["admin", "supervisor", "vendedor"] },
-    { id: "reports", label: "Reportes", roles: ["admin", "supervisor"] },
-    { id: "authorizations", label: "Autorizaciones", roles: ["admin", "supervisor"] },
-    { id: "site", label: "Sitio", roles: ["admin"] },
-    { id: "users", label: "Usuarios", roles: ["admin"] },
-    { id: "backup", label: "Respaldos", roles: ["admin"] }
+    { id: "dashboard", label: "Dashboard" },
+    { id: "pos", label: "Punto de venta" },
+    { id: "inventory", label: "Productos" },
+    { id: "expenses", label: "Gastos" },
+    { id: "sales", label: "Ventas" },
+    { id: "cash", label: "Caja" },
+    { id: "reports", label: "Reportes" },
+    { id: "authorizations", label: "Autorizaciones" },
+    { id: "site", label: "Sitio" },
+    { id: "users", label: "Usuarios" },
+    { id: "backup", label: "Respaldos" }
   ];
-  return items.filter(item => item.roles.includes(role));
+  return items.filter(item => canAccess(item.id));
 }
 
 function render() {
@@ -485,7 +564,7 @@ function render() {
         </nav>
         <div class="user-box">
           <strong>${currentUser().name}</strong>
-          <span class="badge">${currentUser().role}</span>
+          <span class="badge">${roleLabel(currentUser().role)}</span>
           <button class="ghost" id="logout">Cerrar sesion</button>
         </div>
       </aside>
@@ -522,7 +601,7 @@ function viewHeader() {
   const labels = {
     dashboard: "Dashboard administrativo",
     pos: "Punto de venta",
-    inventory: "Inventario",
+    inventory: "Productos",
     expenses: "Gastos",
     sales: "Ventas",
     cash: "Caja",
@@ -588,7 +667,7 @@ function renderDashboard(root) {
   root.innerHTML = `
     <div class="grid cols-4">
       ${metric("Ventas del dia", money.format(totalSales))}
-      ${metric("Ganancia bruta", money.format(totalSales - totalCost))}
+      ${metric("Ganancia antes de gastos", money.format(totalSales - totalCost))}
       ${metric("Gastos del dia", money.format(totalExpenses))}
       ${metric("Ganancia neta", money.format(totalSales - totalCost - totalExpenses))}
     </div>
@@ -604,7 +683,7 @@ function renderDashboard(root) {
     </div>
     <div class="grid cols-2">
       <div class="panel">
-        <div class="split"><h2>Productos con bajo stock</h2><span class="badge warn">${lowProducts.length}</span></div>
+        <div class="split"><h2>Productos por agotarse</h2><span class="badge warn">${lowProducts.length}</span></div>
         ${lowProducts.length ? productStockTable(lowProducts) : `<p class="empty">No hay productos con pocas unidades.</p>`}
       </div>
       <div class="panel">
@@ -652,8 +731,8 @@ function renderPos(root) {
     <div class="pos-layout">
       <section class="panel">
         <div class="toolbar">
-          <label>Escaner / codigo <input id="barcode-input" placeholder="Escanea o escribe el codigo y Enter" autocomplete="off"></label>
-          <label>Busqueda rapida <input id="product-search" placeholder="Nombre o codigo"></label>
+          <label>Escaner o codigo <input id="barcode-input" placeholder="Escanea o escribe el codigo y Enter" autocomplete="off"></label>
+          <label>Buscar producto <input id="product-search" placeholder="Nombre o codigo"></label>
           <label>Tipo <select id="category-filter"><option value="">Todos</option>${state.categories.map(c => `<option value="${c.id}">${c.name}</option>`).join("")}</select></label>
         </div>
         <div class="product-list" id="product-list"></div>
@@ -721,7 +800,7 @@ function renderProductButtons() {
       <button class="product-button" data-add-product="${product.id}">
         <strong>${product.name}</strong>
         <small>${product.code}</small>
-        <small>${money.format(product.price)} | ${unitLabel(product)} disp.</small>
+        <small>${money.format(product.price)} | quedan ${unitLabel(product)}</small>
       </button>`).join("")
     : `<p class="empty">No se encontraron productos.</p>`;
   document.querySelectorAll("[data-add-product]").forEach(button => {
@@ -749,14 +828,14 @@ function handleBarcodeScan(event) {
 
 function addToCart(productId, optionId = "base") {
   const product = state.products.find(item => item.id === productId);
-  if (!product || product.units <= 0) return toast("Producto sin existencias");
+  if (!product || product.units <= 0) return toast("Producto agotado");
   const options = saleOptions(product);
   if (!optionId && options.length > 1) return saleOptionModal(product);
   const option = getSaleOption(product, optionId);
   const account = currentAccount();
   const line = account.items.find(item => item.productId === productId && item.optionId === option.id);
   const currentQty = line?.qty || 0;
-  if ((currentQty + 1) * option.quantity > product.units) return toast("No hay suficientes unidades");
+  if ((currentQty + 1) * option.quantity > product.units) return toast("No alcanza la cantidad disponible");
   if (line) line.qty += 1;
   else account.items.push({ productId, optionId: option.id, optionName: option.name, unitQuantity: option.quantity, unitPrice: option.price, qty: 1 });
   saveSession();
@@ -765,12 +844,12 @@ function addToCart(productId, optionId = "base") {
 
 function saleOptionModal(product) {
   showModal(`
-    <h2>Elegir presentacion</h2>
+    <h2>Elegir forma de venta</h2>
     <p>${escapeHtml(product.name)} | Disponible: ${unitLabel(product)}</p>
     <div class="grid">
       ${saleOptions(product).map(option => `<button class="product-button" data-sale-option="${option.id}">
         <strong>${escapeHtml(option.name)}</strong>
-        <small>Descuenta ${unitLabel(product, option.quantity)}</small>
+        <small>Sale del inventario: ${unitLabel(product, option.quantity)}</small>
         <small>${money.format(option.price)}</small>
       </button>`).join("")}
     </div>
@@ -787,7 +866,7 @@ function cartHtml(account) {
   return account.items.map(item => {
     const product = state.products.find(p => p.id === item.productId);
     return `<div class="cart-line">
-      <div><strong>${product.name}</strong><br><small class="muted">${item.optionName || "Unidad"} | descuenta ${unitLabel(product, cartStockNeeded(item))}</small></div>
+      <div><strong>${product.name}</strong><br><small class="muted">${item.optionName || "Por pieza"} | sale del inventario: ${unitLabel(product, cartStockNeeded(item))}</small></div>
       <input data-cart-qty="${product.id}|${item.optionId || "base"}" type="number" min="1" max="${Math.floor(product.units / (item.unitQuantity || 1))}" value="${item.qty}">
       <strong>${money.format((item.unitPrice || product.price) * item.qty)}</strong>
       <button class="tiny danger" data-remove-cart="${product.id}|${item.optionId || "base"}">X</button>
@@ -1034,7 +1113,7 @@ function renderInventory(root) {
   root.innerHTML = `
     <div class="panel">
       <div class="toolbar">
-        <label>Busqueda rapida <input id="inventory-search" placeholder="Nombre, codigo o tipo"></label>
+        <label>Buscar producto <input id="inventory-search" placeholder="Nombre, codigo o tipo"></label>
         <button class="primary compact" id="new-product">Agregar producto</button>
         ${can("admin", "supervisor") ? `<button class="ghost compact" id="new-category">Nuevo tipo</button>` : ""}
       </div>
@@ -1042,7 +1121,7 @@ function renderInventory(root) {
     </div>
     ${can("admin", "supervisor") ? `
     <div class="panel">
-      <h2>Historial de movimientos</h2>
+      <h2>Historial de entradas y salidas</h2>
       ${movementTable(state.movements.slice(0, 30))}
     </div>` : ""}
   `;
@@ -1067,61 +1146,115 @@ function drawInventoryTable() {
 function productTable(products) {
   if (!products.length) return `<p class="empty">No hay productos.</p>`;
   return `<div class="table-wrap"><table>
-    <thead><tr><th>Producto</th><th>Codigo</th><th>Tipo</th><th>Existencia</th><th>Costo base</th><th>Venta base</th><th>Presentaciones</th><th>Acciones</th></tr></thead>
+    <thead><tr><th>Producto</th><th>Codigo</th><th>Tipo</th><th>Cantidad disponible</th><th>Lo que costo</th><th>Precio al publico</th><th>Se vende como</th><th>Acciones</th></tr></thead>
     <tbody>${products.map(product => `<tr>
       <td>${product.name} ${product.active ? "" : `<span class="badge danger">Inactivo</span>`}</td>
       <td>${product.code}</td>
       <td>${categoryName(product.categoryId)}</td>
-      <td><span class="badge ${product.units <= product.minStock ? "warn" : "ok"}">${unitLabel(product)}</span><br><small class="muted">Min: ${unitLabel(product, product.minStock)}</small></td>
+      <td><span class="badge ${product.units <= product.minStock ? "warn" : "ok"}">${unitLabel(product)}</span><br><small class="muted">Avisar en: ${unitLabel(product, product.minStock)}</small></td>
       <td>${money.format(product.cost)}</td>
       <td>${money.format(product.price)}</td>
       <td>${saleOptions(product).map(option => escapeHtml(option.name)).join(", ")}</td>
       <td><div class="actions">
-        <button class="tiny" data-stock-product="${product.id}">Stock</button>
+        <button class="tiny" data-stock-product="${product.id}">Entrada</button>
         ${can("admin", "supervisor") ? `<button class="tiny" data-edit-product="${product.id}">Editar</button><button class="tiny danger" data-delete-product="${product.id}">${product.active ? "Desactivar" : "Activar"}</button>` : ""}
       </div></td>
     </tr>`).join("")}</tbody></table></div>`;
 }
 
 function productStockTable(products) {
-  return `<div class="table-wrap"><table><thead><tr><th>Producto</th><th>Existencia</th><th>Minimo</th></tr></thead><tbody>${products.map(product => `<tr><td>${product.name}</td><td>${unitLabel(product)}</td><td>${unitLabel(product, product.minStock)}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Producto</th><th>Quedan</th><th>Avisar en</th></tr></thead><tbody>${products.map(product => `<tr><td>${product.name}</td><td>${unitLabel(product)}</td><td>${unitLabel(product, product.minStock)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function productModal(productId) {
   if (!can("admin", "supervisor") && productId) return toast("Solo administracion puede editar productos");
   const product = normalizeProduct(state.products.find(item => item.id === productId) || {});
+  const mode = product.stockUnit === "gramo" || product.stockUnit === "miligramo" ? "peso" : product.packageUnits > 1 || product.packagePrice > 0 || product.wholesaleMin > 0 ? "paquete" : "unidad";
   showModal(`
     <h2>${productId ? "Editar producto" : "Agregar producto"}</h2>
-    <form id="product-form" class="grid cols-2">
-      <label>Nombre <input name="name" required value="${product.name || ""}"></label>
-      <label>Codigo <input name="code" required value="${product.code || ""}"></label>
-      <label class="wide">Codigos alternos <textarea name="aliasCodes" placeholder="Uno por linea">${(product.aliasCodes || []).join("\n")}</textarea></label>
-      <label>Tipo <select name="categoryId">${state.categories.map(c => `<option value="${c.id}" ${product.categoryId === c.id ? "selected" : ""}>${c.name}</option>`).join("")}</select></label>
-      <label>Formato base de inventario
-        <select name="stockUnit">
-          <option value="pieza" ${product.stockUnit === "pieza" ? "selected" : ""}>Piezas</option>
-          <option value="paquete" ${product.stockUnit === "paquete" ? "selected" : ""}>Paquetes</option>
-          <option value="gramo" ${product.stockUnit === "gramo" ? "selected" : ""}>Gramos</option>
-          <option value="miligramo" ${product.stockUnit === "miligramo" ? "selected" : ""}>Miligramos</option>
-        </select>
-      </label>
-      <label>Existencia base <input name="units" type="number" min="0" step="0.001" required value="${product.units ?? 0}"></label>
-      <label>Costo por unidad base <input name="cost" type="number" min="0" step="0.01" required value="${product.cost ?? 0}"></label>
-      <label>Precio venta base <input name="price" type="number" min="0" step="0.01" required value="${product.price ?? 0}"></label>
-      <label>Stock minimo <input name="minStock" type="number" min="0" required value="${product.minStock ?? 1}"></label>
-      <label>Piezas/gramos por paquete <input name="packageUnits" type="number" min="0" step="0.001" value="${product.packageUnits || 0}"></label>
-      <label>Precio venta paquete <input name="packagePrice" type="number" min="0" step="0.01" value="${product.packagePrice || 0}"></label>
-      <label>Mayoreo desde cantidad <input name="wholesaleMin" type="number" min="0" step="0.001" value="${product.wholesaleMin || 0}"></label>
-      <label>Precio unitario mayoreo <input name="wholesalePrice" type="number" min="0" step="0.01" value="${product.wholesalePrice || 0}"></label>
+    <form id="product-form" class="stack">
+      <div class="grid cols-2">
+        <label>Nombre del producto <input name="name" required value="${escapeHtml(product.name || "")}"></label>
+        <label>Codigo de barras o interno <input name="code" required value="${escapeHtml(product.code || "")}"></label>
+        <label>Tipo de producto <select name="categoryId">${state.categories.map(c => `<option value="${c.id}" ${product.categoryId === c.id ? "selected" : ""}>${c.name}</option>`).join("")}</select></label>
+        <label>Como se maneja este producto
+          <select name="productMode" id="product-mode">
+            <option value="unidad" ${mode === "unidad" ? "selected" : ""}>Por piezas o unidades</option>
+            <option value="paquete" ${mode === "paquete" ? "selected" : ""}>Por cajas o paquetes</option>
+            <option value="peso" ${mode === "peso" ? "selected" : ""}>Por peso</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="panel compact">
+        <button type="button" class="ghost compact" id="toggle-alias">Agregar otro codigo</button>
+        <label id="alias-box" class="wide" style="display:${(product.aliasCodes || []).length ? "grid" : "none"}">Otros codigos para el mismo producto <textarea name="aliasCodes" placeholder="Uno por linea">${(product.aliasCodes || []).join("\n")}</textarea></label>
+        <p class="hint">Usalo si el producto llega con otro codigo de barras o si quieres manejar un codigo interno extra.</p>
+      </div>
+
+      <div class="grid cols-2">
+        <label id="stock-unit-label">Como se cuenta en la tienda
+          <select name="stockUnit">
+            <option value="pieza" ${product.stockUnit === "pieza" ? "selected" : ""}>Piezas o unidades</option>
+            <option value="paquete" ${product.stockUnit === "paquete" ? "selected" : ""}>Paquetes</option>
+          </select>
+        </label>
+        <label id="weight-unit-label">Como se guardara la cantidad
+          <select name="weightUnit">
+            <option value="gramo" ${product.stockUnit !== "miligramo" ? "selected" : ""}>Gramos</option>
+            <option value="miligramo" ${product.stockUnit === "miligramo" ? "selected" : ""}>Miligramos</option>
+          </select>
+        </label>
+        <label>Cantidad inicial <input name="units" type="number" min="0" step="0.001" required value="${product.units ?? 0}"></label>
+        <label>Cuanto costo comprarlo <input name="cost" type="number" min="0" step="0.01" required value="${product.cost ?? 0}"></label>
+        <label>Precio al publico <input name="price" type="number" min="0" step="0.01" required value="${product.price ?? 0}"></label>
+        <label>Avisar cuando queden <input name="minStock" type="number" min="0" step="0.001" required value="${product.minStock ?? 1}"></label>
+      </div>
+
+      <div class="panel compact" id="package-fields">
+        <h3>Cajas, paquetes y precio especial</h3>
+        <div class="grid cols-2">
+          <label>Piezas que trae cada caja/paquete <input name="packageUnits" type="number" min="0" step="0.001" value="${product.packageUnits || 0}"></label>
+          <label>Precio al vender caja/paquete <input name="packagePrice" type="number" min="0" step="0.01" value="${product.packagePrice || 0}"></label>
+          <label>Precio especial desde cuantas piezas <input name="wholesaleMin" type="number" min="0" step="0.001" value="${product.wholesaleMin || 0}"></label>
+          <label>Precio especial por pieza <input name="wholesalePrice" type="number" min="0" step="0.01" value="${product.wholesalePrice || 0}"></label>
+        </div>
+        <p class="hint">Ejemplo: si una caja trae 24 piezas, escribe 24. Al vender una caja, el sistema descuenta esas 24 piezas.</p>
+      </div>
+
+      <div class="panel compact" id="weight-help">
+        <h3>Producto que se vende por peso</h3>
+        <p class="hint">Para productos por peso puedes recibir kilos, gramos o miligramos en la entrada de stock. El sistema hara la conversion automaticamente.</p>
+      </div>
+
       <div class="actions"><button class="primary">Guardar</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
     </form>
   `);
-  document.querySelector("#product-form").addEventListener("submit", event => {
+  const form = document.querySelector("#product-form");
+  const syncProductMode = () => {
+    const selected = form.productMode.value;
+    document.querySelector("#package-fields").style.display = selected === "paquete" ? "block" : "none";
+    document.querySelector("#weight-help").style.display = selected === "peso" ? "block" : "none";
+    document.querySelector("#stock-unit-label").style.display = selected === "peso" ? "none" : "grid";
+    document.querySelector("#weight-unit-label").style.display = selected === "peso" ? "grid" : "none";
+  };
+  document.querySelector("#toggle-alias").addEventListener("click", () => {
+    const box = document.querySelector("#alias-box");
+    box.style.display = box.style.display === "none" ? "grid" : "none";
+  });
+  form.productMode.addEventListener("change", syncProductMode);
+  syncProductMode();
+  form.addEventListener("submit", event => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.target));
-    const aliases = data.aliasCodes.split(/\r?\n/).map(code => code.trim()).filter(Boolean);
+    const aliases = (data.aliasCodes || "").split(/\r?\n/).map(code => code.trim()).filter(Boolean);
     const duplicate = state.products.find(p => [p.code, ...(p.aliasCodes || [])].includes(data.code) && p.id !== productId);
     if (duplicate) return toast("Ya existe un producto con ese codigo");
+    const stockUnit = data.productMode === "peso" ? data.weightUnit : data.stockUnit;
+    const packageUnits = data.productMode === "paquete" ? Number(data.packageUnits || 0) : 0;
+    const packagePrice = data.productMode === "paquete" ? Number(data.packagePrice || 0) : 0;
+    const wholesaleMin = data.productMode === "paquete" ? Number(data.wholesaleMin || 0) : 0;
+    const wholesalePrice = data.productMode === "paquete" ? Number(data.wholesalePrice || 0) : 0;
     if (productId) {
       const before = product.units;
       Object.assign(product, {
@@ -1129,15 +1262,15 @@ function productModal(productId) {
         code: data.code,
         aliasCodes: aliases,
         categoryId: data.categoryId,
-        stockUnit: data.stockUnit,
+        stockUnit,
         units: Number(data.units),
         cost: Number(data.cost),
         price: Number(data.price),
         minStock: Number(data.minStock),
-        packageUnits: Number(data.packageUnits || 0),
-        packagePrice: Number(data.packagePrice || 0),
-        wholesaleMin: Number(data.wholesaleMin || 0),
-        wholesalePrice: Number(data.wholesalePrice || 0)
+        packageUnits,
+        packagePrice,
+        wholesaleMin,
+        wholesalePrice
       });
       if (before !== product.units) addMovement(product, "Ajuste por edicion", before, product.units - before, product.units, product.id);
       logOperation("editar_producto", "products", product.id, `Edito ${product.name}`);
@@ -1148,15 +1281,15 @@ function productModal(productId) {
         code: data.code,
         aliasCodes: aliases,
         categoryId: data.categoryId,
-        stockUnit: data.stockUnit,
+        stockUnit,
         units: Number(data.units),
         cost: Number(data.cost),
         price: Number(data.price),
         minStock: Number(data.minStock),
-        packageUnits: Number(data.packageUnits || 0),
-        packagePrice: Number(data.packagePrice || 0),
-        wholesaleMin: Number(data.wholesaleMin || 0),
-        wholesalePrice: Number(data.wholesalePrice || 0),
+        packageUnits,
+        packagePrice,
+        wholesaleMin,
+        wholesalePrice,
         active: true
       };
       normalizeProduct(created);
@@ -1172,36 +1305,47 @@ function productModal(productId) {
 
 function stockModal(productId) {
   const product = state.products.find(item => item.id === productId);
+  const isWeight = product.stockUnit === "gramo" || product.stockUnit === "miligramo";
+  const receiptOptions = isWeight
+    ? `<option value="base">${product.stockUnit === "miligramo" ? "Miligramos" : "Gramos"}</option><option value="kg">Kilos</option><option value="g">Gramos</option><option value="mg">Miligramos</option>`
+    : `<option value="base">${product.stockUnit === "paquete" ? "Paquetes" : "Unidades sueltas"}</option><option value="box">Cajas</option><option value="largePackage">Paquetes recibidos</option>`;
   showModal(`
-    <h2>Modificar stock</h2>
+    <h2>Agregar o quitar producto</h2>
     <p>${product.name}: <strong>${unitLabel(product)}</strong> actuales.</p>
     <form id="stock-form" class="stack">
-      <label>Movimiento
-        <select name="type"><option value="Entrada manual">Agregar stock</option><option value="Salida manual">Quitar stock</option></select>
+      <label>Que quieres hacer
+        <select name="type"><option value="Entrada manual">Agregar producto</option><option value="Salida manual">Quitar producto</option></select>
       </label>
-      <label>Como se recibe o ajusta
-        <select name="receiptType">
-          <option value="base">Unidad base (${product.stockUnit})</option>
-          <option value="box">Cajas</option>
-          <option value="largePackage">Paquetes grandes</option>
-          <option value="kg">Kilos</option>
-          <option value="g">Gramos</option>
-          <option value="mg">Miligramos</option>
-        </select>
+      <label>Como lo estas registrando
+        <select name="receiptType" id="receipt-type">${receiptOptions}</select>
       </label>
-      <label>Cantidad recibida <input name="qty" type="number" min="0.001" step="0.001" required></label>
-      <label>Contenido por caja/paquete <input name="unitsPerContainer" type="number" min="0.001" step="0.001" value="${product.packageUnits || 1}"></label>
-      <label>Costo por unidad base de este lote <input name="cost" type="number" min="0" step="0.01" value="${product.cost || 0}"></label>
-      <p class="hint">El sistema convierte cajas, paquetes, kilos, gramos o miligramos a la unidad base del producto y lo suma al inventario.</p>
+      <label>Cantidad <input name="qty" type="number" min="0.001" step="0.001" required></label>
+      <label id="container-label">Cuantas piezas trae cada caja/paquete <input name="unitsPerContainer" type="number" min="0.001" step="0.001" value="${product.packageUnits || 1}"></label>
+      <label>Cuanto costo comprarlo <input name="cost" type="number" min="0" step="0.01" value="${product.cost || 0}"></label>
+      <p id="stock-preview" class="badge">Conversion pendiente</p>
+      <p class="hint">El sistema convierte cajas, paquetes o kilos a la cantidad real y la suma o resta automaticamente.</p>
       <div class="actions"><button class="primary">Guardar</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
     </form>
   `);
-  document.querySelector("#stock-form").addEventListener("submit", event => {
+  const form = document.querySelector("#stock-form");
+  const updateStockPreview = () => {
+    const data = Object.fromEntries(new FormData(form));
+    const receiptType = data.receiptType;
+    document.querySelector("#container-label").style.display = ["box", "largePackage"].includes(receiptType) ? "grid" : "none";
+    const qty = Number(data.qty || 0);
+    const converted = convertStockInput(product, receiptType, qty, Number(data.unitsPerContainer || 1));
+    document.querySelector("#stock-preview").textContent = qty > 0 ? `Equivale a ${unitLabel(product, converted)}` : "Conversion pendiente";
+  };
+  form.receiptType.addEventListener("change", updateStockPreview);
+  form.qty.addEventListener("input", updateStockPreview);
+  form.unitsPerContainer.addEventListener("input", updateStockPreview);
+  updateStockPreview();
+  form.addEventListener("submit", event => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.target));
     const qty = convertStockInput(product, data.receiptType, Number(data.qty), Number(data.unitsPerContainer || 1));
     const change = data.type === "Salida manual" ? -qty : qty;
-    if (product.units + change < 0) return toast("No puedes dejar stock negativo");
+    if (product.units + change < 0) return toast("No puedes dejar cantidades negativas");
     const before = product.units;
     product.units += change;
     if (change > 0) {
@@ -1209,7 +1353,7 @@ function stockModal(productId) {
       addLot(product, change, product.cost, data.receiptType);
     }
     addMovement(product, data.type, before, change, product.units, product.id);
-    logOperation("stock", "products", product.id, `${data.type} de ${unitLabel(product, qty)} recibido como ${data.receiptType}`);
+    logOperation("stock", "products", product.id, `${data.type} de ${unitLabel(product, qty)} registrado como ${data.receiptType}`);
     saveState();
     closeModal();
     render();
@@ -1355,8 +1499,8 @@ function saleDetailModal(saleId) {
     <h2>Detalle de venta</h2>
     <p>Folio: ${sale.id}</p>
     <p>Nota/ticket: ${escapeHtml(sale.ticketFolio || "-")} | Vendedor: ${userName(sale.userId)} | Fecha: ${sale.date} ${sale.time} | Pago: ${paymentLabel(sale)}</p>
-    <div class="table-wrap"><table><thead><tr><th>Producto</th><th>Presentacion</th><th>Cant.</th><th>Descuento stock</th>${sellerView ? "" : "<th>Costo total</th>"}<th>Venta</th><th>Total</th>${sellerView ? "" : "<th>Ganancia</th>"}</tr></thead>
-    <tbody>${sale.items.map(item => `<tr><td>${item.name}</td><td>${item.optionName || "Unidad"}</td><td>${item.qty}</td><td>${item.stockQty || item.qty}</td>${sellerView ? "" : `<td>${money.format(item.costTotal ?? item.cost * item.qty)}</td>`}<td>${money.format(item.price)}</td><td>${money.format(item.subtotal)}</td>${sellerView ? "" : `<td>${money.format(item.profit)}</td>`}</tr>`).join("")}</tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>Producto</th><th>Forma de venta</th><th>Cant.</th><th>Salio del inventario</th>${sellerView ? "" : "<th>Lo que costo</th>"}<th>Precio</th><th>Total</th>${sellerView ? "" : "<th>Ganancia</th>"}</tr></thead>
+    <tbody>${sale.items.map(item => `<tr><td>${item.name}</td><td>${item.optionName || "Por pieza"}</td><td>${item.qty}</td><td>${item.stockQty || item.qty}</td>${sellerView ? "" : `<td>${money.format(item.costTotal ?? item.cost * item.qty)}</td>`}<td>${money.format(item.price)}</td><td>${money.format(item.subtotal)}</td>${sellerView ? "" : `<td>${money.format(item.profit)}</td>`}</tr>`).join("")}</tbody></table></div>
     <button class="ghost" data-close-modal>Cerrar</button>
   `);
 }
@@ -1380,7 +1524,7 @@ function authorizeModal(title, onSuccess) {
       onSuccess(byCode);
       return;
     }
-    const authUser = state.users.find(user => user.username === data.username && user.password === data.password && user.active && ["admin", "supervisor"].includes(user.role));
+    const authUser = state.users.find(user => user.username === data.username && user.password === data.password && user.active && (isMaster(user) || ["admin", "supervisor"].includes(user.role)) && canAccess("authorizations", user));
     if (!authUser) return toast("Autorizacion invalida");
     onSuccess(authUser);
   });
@@ -1509,10 +1653,10 @@ function cashSummary(cash) {
       ${metric("Efectivo", money.format(cashSold))}
       ${metric("Tarjeta", money.format(cardSold))}
       ${metric("Transferencia", money.format(transferSold))}
-      ${metric("Tickets/comprobantes", money.format(ticketSold))}
+      ${metric("Tarjeta/transferencia", money.format(ticketSold))}
       ${metric("Gastos", money.format(spent))}
       ${metric("Esperado en caja", money.format(expected))}
-      ${metric("Cuadre con tickets", money.format(expectedWithTickets))}
+      ${metric("Cuadre completo", money.format(expectedWithTickets))}
     </div>
     <div class="panel">
       <h3>Notas registradas en esta caja</h3>
@@ -1565,11 +1709,11 @@ function drawReports() {
   }, { cost: 0, sold: 0, profit: 0 });
   document.querySelector("#report-content").innerHTML = `
     <div class="grid cols-3">
-      ${metric("Costo total", money.format(totals.cost))}
+      ${metric("Lo que costo", money.format(totals.cost))}
       ${metric("Venta total", money.format(totals.sold))}
       ${metric("Ganancia neta", money.format(totals.profit))}
     </div>
-    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Tipo</th><th>Nombre</th><th>Hora</th><th>Unidades</th><th>Costo</th><th>Venta / gasto</th><th>Ganancia</th></tr></thead><tbody>${rows.map(row => `<tr><td>${row.type}</td><td>${row.name}</td><td>${row.time}</td><td>${row.qty}</td><td>${money.format(row.cost)}</td><td>${money.format(row.sold)}</td><td>${money.format(row.profit)}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">Sin movimientos para esta fecha.</p>`}
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Tipo</th><th>Nombre</th><th>Hora</th><th>Cantidad</th><th>Lo que costo</th><th>Venta o gasto</th><th>Ganancia</th></tr></thead><tbody>${rows.map(row => `<tr><td>${row.type}</td><td>${row.name}</td><td>${row.time}</td><td>${row.qty}</td><td>${money.format(row.cost)}</td><td>${money.format(row.sold)}</td><td>${money.format(row.profit)}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">Sin movimientos para esta fecha.</p>`}
   `;
 }
 
@@ -1714,23 +1858,7 @@ function toggleAnnouncement(id) {
   render();
 }
 
-function renderUsers(root) {
-  root.innerHTML = `
-    <div class="panel">
-      <div class="split"><h2>Vendedores, supervisores y administradores</h2><button class="primary" id="new-user">Nuevo usuario</button></div>
-      ${userTable()}
-    </div>
-  `;
-  document.querySelector("#new-user").addEventListener("click", () => userModal());
-  document.querySelectorAll("[data-edit-user]").forEach(button => button.addEventListener("click", () => userModal(button.dataset.editUser)));
-  document.querySelectorAll("[data-toggle-user]").forEach(button => button.addEventListener("click", () => toggleUser(button.dataset.toggleUser)));
-}
-
-function userTable() {
-  return `<div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Usuario</th><th>Rol</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${state.users.map(user => `<tr><td>${user.name}</td><td>${user.username}</td><td>${user.role}</td><td><span class="badge ${user.active ? "ok" : "danger"}">${user.active ? "Activo" : "Inactivo"}</span></td><td><div class="actions"><button class="tiny" data-edit-user="${user.id}">Editar</button><button class="tiny danger" data-toggle-user="${user.id}" ${user.id === session.userId ? "disabled" : ""}>${user.active ? "Desactivar" : "Activar"}</button></div></td></tr>`).join("")}</tbody></table></div>`;
-}
-
-function userModal(userId) {
+function legacyUserModal(userId) {
   const user = state.users.find(item => item.id === userId) || {};
   showModal(`
     <h2>${userId ? "Editar usuario" : "Nuevo usuario"}</h2>
@@ -1760,8 +1888,113 @@ function userModal(userId) {
   });
 }
 
+function legacyToggleUser(userId) {
+  const user = state.users.find(item => item.id === userId);
+  user.active = !user.active;
+  logOperation("estado_usuario", "users", user.id, `${user.active ? "Activo" : "Desactivo"} usuario ${user.name}`);
+  saveState();
+  render();
+}
+
+function renderUsers(root) {
+  const canCreate = isMaster() || currentUser().role === "admin";
+  root.innerHTML = `
+    <div class="panel">
+      <div class="split"><h2>Usuarios y accesos</h2><button class="primary" id="new-user" ${canCreate ? "" : "disabled"}>Nuevo usuario</button></div>
+      <p class="muted">Activa o quita accesos por usuario. Solo el Dueno/Master puede modificar administradores; nadie puede desactivar o cambiar al Master.</p>
+      ${userTable()}
+    </div>
+  `;
+  document.querySelector("#new-user").addEventListener("click", () => userModal());
+  document.querySelectorAll("[data-edit-user]").forEach(button => button.addEventListener("click", () => userModal(button.dataset.editUser)));
+  document.querySelectorAll("[data-toggle-user]").forEach(button => button.addEventListener("click", () => toggleUser(button.dataset.toggleUser)));
+}
+
+function userTable() {
+  return `<div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Usuario</th><th>Tipo de usuario</th><th>Accesos</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${state.users.map(user => {
+    const accessCount = VIEW_ACCESS.filter(item => canAccess(item.id, user)).length;
+    const editable = canEditUser(user);
+    const canToggle = editable && user.id !== session.userId && !isMaster(user);
+    return `<tr>
+      <td>${escapeHtml(user.name)}</td>
+      <td>${escapeHtml(user.username)}</td>
+      <td>${roleLabel(user.role)}</td>
+      <td>${isMaster(user) ? "Todos" : `${accessCount} de ${VIEW_ACCESS.length}`}</td>
+      <td><span class="badge ${user.active ? "ok" : "danger"}">${user.active ? "Activo" : "Inactivo"}</span></td>
+      <td><div class="actions">
+        <button class="tiny" data-edit-user="${user.id}" ${editable ? "" : "disabled"}>Editar</button>
+        <button class="tiny danger" data-toggle-user="${user.id}" ${canToggle ? "" : "disabled"}>${user.active ? "Desactivar" : "Activar"}</button>
+      </div></td>
+    </tr>`;
+  }).join("")}</tbody></table></div>`;
+}
+
+function userModal(userId) {
+  const existing = state.users.find(item => item.id === userId);
+  if (!userId && !isMaster() && currentUser().role !== "admin") return toast("Solo administracion puede crear usuarios");
+  if (userId && !canEditUser(existing)) return toast("No tienes permiso para modificar ese usuario");
+  const user = existing || { role: "vendedor", access: defaultAccessForRole("vendedor") };
+  const actorIsMaster = isMaster();
+  const targetIsMaster = isMaster(user);
+  const selectedAccess = { ...defaultAccessForRole(user.role), ...(user.access || {}) };
+  const roleOptions = targetIsMaster
+    ? `<option value="master" selected>Dueno/Master</option>`
+    : `${actorIsMaster ? `<option value="admin" ${user.role === "admin" ? "selected" : ""}>Administrador</option>` : ""}<option value="supervisor" ${user.role === "supervisor" ? "selected" : ""}>Supervisor</option><option value="vendedor" ${user.role === "vendedor" ? "selected" : ""}>Vendedor</option>`;
+  showModal(`
+    <h2>${userId ? "Editar usuario" : "Nuevo usuario"}</h2>
+    <form id="user-form" class="stack">
+      <div class="grid cols-2">
+        <label>Nombre <input name="name" required value="${escapeHtml(user.name || "")}"></label>
+        <label>Usuario <input name="username" required value="${escapeHtml(user.username || "")}"></label>
+        <label>Contrasena <input name="password" required value="${escapeHtml(user.password || "")}"></label>
+        <label>Tipo de usuario <select name="role" ${targetIsMaster ? "disabled" : ""}>${roleOptions}</select></label>
+      </div>
+      <div class="panel compact">
+        <h3>Accesos permitidos</h3>
+        <div class="grid cols-2" id="user-access-list">
+          ${VIEW_ACCESS.map(item => `<label><input type="checkbox" name="access" value="${item.id}" ${selectedAccess[item.id] ? "checked" : ""} ${targetIsMaster ? "disabled" : ""}> ${item.label}</label>`).join("")}
+        </div>
+        <p class="hint">Autorizaciones permite generar tokens y autorizar operaciones con usuario y contrasena.</p>
+      </div>
+      <div class="actions"><button class="primary">Guardar</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
+    </form>
+  `);
+  const form = document.querySelector("#user-form");
+  form.role?.addEventListener("change", event => {
+    const defaults = defaultAccessForRole(event.target.value);
+    form.querySelectorAll("[name='access']").forEach(input => {
+      input.checked = Boolean(defaults[input.value]);
+    });
+  });
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    const formData = new FormData(event.target);
+    const data = Object.fromEntries(formData);
+    const role = targetIsMaster ? "master" : data.role;
+    if ((role === "admin" || role === "master") && !actorIsMaster) return toast("Solo el Master puede asignar administradores");
+    if (state.users.some(item => item.username === data.username && item.id !== userId)) return toast("Ese usuario ya existe");
+    const selected = formData.getAll("access");
+    const access = targetIsMaster
+      ? { ...DEFAULT_ACCESS.master }
+      : Object.fromEntries(VIEW_ACCESS.map(item => [item.id, selected.includes(item.id)]));
+    if (role !== "admin") access.users = false;
+    if (userId) {
+      Object.assign(user, { name: data.name, username: data.username, password: data.password, role, access });
+      logOperation("editar_usuario", "users", user.id, `Edito usuario ${user.name}`);
+    } else {
+      const created = normalizeUser({ id: uid("usr"), name: data.name, username: data.username, password: data.password, role, access, active: true });
+      state.users.push(created);
+      logOperation("alta_usuario", "users", created.id, `Creo usuario ${created.name}`);
+    }
+    saveState();
+    closeModal();
+    render();
+  });
+}
+
 function toggleUser(userId) {
   const user = state.users.find(item => item.id === userId);
+  if (!canEditUser(user) || isMaster(user) || user.id === session.userId) return toast("No puedes cambiar el estado de ese usuario");
   user.active = !user.active;
   logOperation("estado_usuario", "users", user.id, `${user.active ? "Activo" : "Desactivo"} usuario ${user.name}`);
   saveState();
@@ -1772,8 +2005,8 @@ function renderBackup(root) {
   root.innerHTML = `
     <div class="grid cols-2">
       <div class="panel">
-        <h2>Respaldo de base de datos</h2>
-        <p class="muted">Descarga toda la informacion en formato JSON para conservar productos, ventas, cajas, usuarios, gastos y bitacora.</p>
+        <h2>Respaldo de informacion</h2>
+        <p class="muted">Descarga una copia de productos, ventas, cajas, usuarios, gastos y bitacora.</p>
         <button class="primary" id="make-backup">Generar respaldo</button>
       </div>
       <div class="panel">
@@ -1791,7 +2024,7 @@ function renderBackup(root) {
 function makeBackup() {
   const backup = { id: uid("bak"), date: today(), time: nowTime(), userId: session.userId, data: state };
   state.backups.unshift({ id: backup.id, date: backup.date, time: backup.time, userId: backup.userId, filename: `respaldo-tienda-${backup.date}.json` });
-  logOperation("respaldo", "backups", backup.id, "Genero respaldo de base de datos");
+  logOperation("respaldo", "backups", backup.id, "Genero respaldo de informacion");
   saveState();
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -1811,7 +2044,7 @@ function restoreBackup() {
     try {
       const backup = JSON.parse(reader.result);
       state = backup.data || backup;
-      logOperation("restauracion", "backups", backup.id || "manual", "Restauro respaldo de base de datos");
+      logOperation("restauracion", "backups", backup.id || "manual", "Restauro respaldo de informacion");
       saveState();
       render();
       toast("Respaldo restaurado");
@@ -1834,7 +2067,7 @@ function expenseTable(expenses) {
 
 function movementTable(movements) {
   if (!movements.length) return `<p class="empty">Sin movimientos de inventario.</p>`;
-  return `<div class="table-wrap"><table><thead><tr><th>Producto</th><th>Movimiento</th><th>Antes</th><th>Cambio</th><th>Final</th><th>Usuario</th><th>Fecha</th></tr></thead><tbody>${movements.map(mov => `<tr><td>${state.products.find(p => p.id === mov.productId)?.name || "Producto"}</td><td>${mov.type}</td><td>${mov.before}</td><td>${mov.change}</td><td>${mov.after}</td><td>${userName(mov.userId)}</td><td>${mov.date} ${mov.time}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Producto</th><th>Operacion</th><th>Antes</th><th>Cambio</th><th>Despues</th><th>Usuario</th><th>Fecha</th></tr></thead><tbody>${movements.map(mov => `<tr><td>${state.products.find(p => p.id === mov.productId)?.name || "Producto"}</td><td>${mov.type}</td><td>${mov.before}</td><td>${mov.change}</td><td>${mov.after}</td><td>${userName(mov.userId)}</td><td>${mov.date} ${mov.time}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function simpleLogTable(logs) {
@@ -1843,7 +2076,7 @@ function simpleLogTable(logs) {
 
 function cashTable(cashes) {
   if (!cashes.length) return `<p class="empty">Sin cajas para mostrar.</p>`;
-  return `<div class="table-wrap"><table><thead><tr><th>Usuario</th><th>Apertura</th><th>Inicial</th><th>Estado</th><th>Efectivo final</th><th>Tickets</th></tr></thead><tbody>${cashes.map(cash => `<tr><td>${userName(cash.userId)}</td><td>${cash.dateOpen} ${cash.timeOpen}</td><td>${money.format(cash.initialAmount)}</td><td><span class="badge ${cash.status === "abierta" ? "ok" : ""}">${cash.status}</span></td><td>${cash.finalAmount == null ? "-" : money.format(cash.finalAmount)}</td><td>${cash.ticketAmount == null ? "-" : money.format(cash.ticketAmount)}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Usuario</th><th>Apertura</th><th>Inicio de caja</th><th>Estado</th><th>Efectivo final</th><th>Tarjeta/transf.</th></tr></thead><tbody>${cashes.map(cash => `<tr><td>${userName(cash.userId)}</td><td>${cash.dateOpen} ${cash.timeOpen}</td><td>${money.format(cash.initialAmount)}</td><td><span class="badge ${cash.status === "abierta" ? "ok" : ""}">${cash.status}</span></td><td>${cash.finalAmount == null ? "-" : money.format(cash.finalAmount)}</td><td>${cash.ticketAmount == null ? "-" : money.format(cash.ticketAmount)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function showModal(html) {
