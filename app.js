@@ -484,6 +484,23 @@ function convertStockInput(product, receiptType, qty, unitsPerContainer) {
   return qty;
 }
 
+function receivedUnitName(receiptType) {
+  return ({
+    base: "unidad registrada",
+    box: "caja",
+    largePackage: "paquete",
+    kg: "kilo",
+    g: "gramo",
+    mg: "miligramo"
+  })[receiptType] || "cantidad recibida";
+}
+
+function calculateUnitCost(product, receiptType, enteredCost, unitsPerContainer, costMode) {
+  if (costMode !== "received") return enteredCost;
+  const unitsInOneReceived = convertStockInput(product, receiptType, 1, unitsPerContainer);
+  return unitsInOneReceived > 0 ? enteredCost / unitsInOneReceived : 0;
+}
+
 function can(...roles) {
   const user = currentUser();
   if (isMaster(user)) return true;
@@ -1323,39 +1340,61 @@ function stockModal(productId) {
       </label>
       <label>Cantidad <input name="qty" type="number" min="0.001" step="0.001" required></label>
       <label id="container-label">Cuantas piezas trae cada caja/paquete <input name="unitsPerContainer" type="number" min="0.001" step="0.001" value="${product.packageUnits || 1}"></label>
-      <label>Cuanto costo comprarlo <input name="cost" type="number" min="0" step="0.01" value="${product.cost || 0}"></label>
+      <label id="cost-mode-label">El costo corresponde a
+        <select name="costMode">
+          <option value="base">Cada pieza/unidad del inventario</option>
+          <option value="received">Cada caja, paquete o medida recibida</option>
+        </select>
+      </label>
+      <label><span id="cost-label-text">Costo por pieza/unidad</span> <input name="cost" type="number" min="0" step="0.01" value="${product.cost || 0}"></label>
       <p id="stock-preview" class="badge">Conversion pendiente</p>
-      <p class="hint">El sistema convierte cajas, paquetes o kilos a la cantidad real y la suma o resta automaticamente.</p>
+      <p class="hint">Si escribes el costo de una caja o paquete, el sistema lo divide entre su contenido para calcular el costo real por pieza.</p>
       <div class="actions"><button class="primary">Guardar</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
     </form>
   `);
   const form = document.querySelector("#stock-form");
-  const updateStockPreview = () => {
+  const updateStockPreview = (receiptChanged = false) => {
     const data = Object.fromEntries(new FormData(form));
     const receiptType = data.receiptType;
-    document.querySelector("#container-label").style.display = ["box", "largePackage"].includes(receiptType) ? "grid" : "none";
+    const usesContainer = ["box", "largePackage"].includes(receiptType);
+    document.querySelector("#container-label").style.display = usesContainer ? "grid" : "none";
+    if (receiptChanged) form.costMode.value = receiptType === "base" ? "base" : "received";
+    const currentCostMode = form.costMode.value;
+    document.querySelector("#cost-mode-label").style.display = receiptType === "base" ? "none" : "grid";
+    document.querySelector("#cost-label-text").textContent = currentCostMode === "received"
+      ? `Costo de cada ${receivedUnitName(receiptType)}`
+      : `Costo por ${product.stockUnit === "pieza" ? "pieza" : product.stockUnit}`;
     const qty = Number(data.qty || 0);
-    const converted = convertStockInput(product, receiptType, qty, Number(data.unitsPerContainer || 1));
-    document.querySelector("#stock-preview").textContent = qty > 0 ? `Equivale a ${unitLabel(product, converted)}` : "Conversion pendiente";
+    const unitsPerContainer = Number(data.unitsPerContainer || 1);
+    const converted = convertStockInput(product, receiptType, qty, unitsPerContainer);
+    const enteredCost = Number(data.cost || 0);
+    const unitCost = calculateUnitCost(product, receiptType, enteredCost, unitsPerContainer, currentCostMode);
+    const quantityText = qty > 0 ? `Equivale a ${unitLabel(product, converted)}` : "Conversion pendiente";
+    const costText = enteredCost >= 0 ? `Costo calculado por ${product.stockUnit === "pieza" ? "pieza" : product.stockUnit}: ${money.format(unitCost)}` : "";
+    document.querySelector("#stock-preview").textContent = `${quantityText} | ${costText}`;
   };
-  form.receiptType.addEventListener("change", updateStockPreview);
-  form.qty.addEventListener("input", updateStockPreview);
-  form.unitsPerContainer.addEventListener("input", updateStockPreview);
+  form.receiptType.addEventListener("change", () => updateStockPreview(true));
+  form.qty.addEventListener("input", () => updateStockPreview(false));
+  form.unitsPerContainer.addEventListener("input", () => updateStockPreview(false));
+  form.costMode.addEventListener("change", () => updateStockPreview(false));
+  form.cost.addEventListener("input", () => updateStockPreview(false));
   updateStockPreview();
   form.addEventListener("submit", event => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.target));
-    const qty = convertStockInput(product, data.receiptType, Number(data.qty), Number(data.unitsPerContainer || 1));
+    const unitsPerContainer = Number(data.unitsPerContainer || 1);
+    const qty = convertStockInput(product, data.receiptType, Number(data.qty), unitsPerContainer);
+    const unitCost = calculateUnitCost(product, data.receiptType, Number(data.cost || 0), unitsPerContainer, data.costMode);
     const change = data.type === "Salida manual" ? -qty : qty;
     if (product.units + change < 0) return toast("No puedes dejar cantidades negativas");
     const before = product.units;
     product.units += change;
     if (change > 0) {
-      product.cost = Number(data.cost || product.cost);
-      addLot(product, change, product.cost, data.receiptType);
+      product.cost = unitCost;
+      addLot(product, change, unitCost, `${data.receiptType}/${data.costMode}`);
     }
     addMovement(product, data.type, before, change, product.units, product.id);
-    logOperation("stock", "products", product.id, `${data.type} de ${unitLabel(product, qty)} registrado como ${data.receiptType}`);
+    logOperation("stock", "products", product.id, `${data.type} de ${unitLabel(product, qty)} con costo unitario ${money.format(unitCost)}`);
     saveState();
     closeModal();
     render();
