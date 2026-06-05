@@ -177,11 +177,13 @@ async function syncStateFromCloud() {
       .single();
     if (error && error.code !== "PGRST116") throw error;
     if (data?.state) {
+      const hadMaster = Array.isArray(data.state.users) && data.state.users.some(user => user.role === "master" || user.isMaster);
       syncingFromServer = true;
       state = normalizeState(data.state);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       syncingFromServer = false;
       render();
+      if (!hadMaster) await pushStateToCloud();
       return true;
     }
     await pushStateToCloud();
