@@ -454,26 +454,96 @@ function findProductByCode(code) {
   return state.products.find(item => item.active && [item.code, ...(item.aliasCodes || [])].some(value => String(value).toLowerCase() === normalized));
 }
 
-function consumeLots(product, qty) {
+function consumeLotsDetailed(product, qty) {
   let remaining = qty;
   let totalCost = 0;
+  const costLayers = [];
   product.lots = product.lots || [];
   for (const lot of product.lots) {
     if (remaining <= 0) break;
     const take = Math.min(lot.qty, remaining);
+    const unitCost = Number(lot.cost || product.cost || 0);
     lot.qty -= take;
     remaining -= take;
-    totalCost += take * Number(lot.cost || product.cost || 0);
+    totalCost += take * unitCost;
+    costLayers.push({ qty: take, cost: unitCost });
   }
   product.lots = product.lots.filter(lot => lot.qty > 0.000001);
-  if (remaining > 0) totalCost += remaining * Number(product.cost || 0);
-  return totalCost;
+  if (remaining > 0) {
+    const unitCost = Number(product.cost || 0);
+    totalCost += remaining * unitCost;
+    costLayers.push({ qty: remaining, cost: unitCost });
+  }
+  return { totalCost, costLayers };
+}
+
+function consumeLots(product, qty) {
+  return consumeLotsDetailed(product, qty).totalCost;
 }
 
 function addLot(product, qty, cost, reference) {
   if (qty <= 0) return;
   product.lots = product.lots || [];
   product.lots.push({ id: uid("lot"), qty, cost: Number(cost), date: today(), reference });
+}
+
+function itemStockQty(item) {
+  return Number(item.stockQty || item.qty || 0);
+}
+
+function itemTotalCost(item) {
+  return Number(item.costTotal ?? Number(item.cost || 0) * itemStockQty(item));
+}
+
+function itemReturnedCost(item) {
+  if (item.returnedCostTotal != null) return Number(item.returnedCostTotal);
+  const stockQty = itemStockQty(item);
+  const returnedStockQty = Number(item.returnedStockQty || 0);
+  return stockQty > 0 ? itemTotalCost(item) * (returnedStockQty / stockQty) : 0;
+}
+
+function itemNetCost(item) {
+  return Math.max(0, itemTotalCost(item) - itemReturnedCost(item));
+}
+
+function itemNetSold(item) {
+  return Math.max(0, Number(item.subtotal || 0) - Number(item.returnedQty || 0) * Number(item.price || 0));
+}
+
+function itemNetProfit(item) {
+  return itemNetSold(item) - itemNetCost(item);
+}
+
+function costLayersForRange(item, offset, qty) {
+  const layers = Array.isArray(item.costLayers) && item.costLayers.length
+    ? item.costLayers
+    : [{ qty: itemStockQty(item), cost: itemStockQty(item) > 0 ? itemTotalCost(item) / itemStockQty(item) : 0 }];
+  let skip = Math.max(0, Number(offset || 0));
+  let remaining = Math.max(0, Number(qty || 0));
+  const selected = [];
+  for (const layer of layers) {
+    if (remaining <= 0) break;
+    const available = Math.max(0, Number(layer.qty || 0));
+    if (skip >= available) {
+      skip -= available;
+      continue;
+    }
+    const take = Math.min(available - skip, remaining);
+    selected.push({ qty: take, cost: Number(layer.cost || 0) });
+    remaining -= take;
+    skip = 0;
+  }
+  if (remaining > 0) {
+    const fallbackCost = itemStockQty(item) > 0 ? itemTotalCost(item) / itemStockQty(item) : Number(item.cost || 0);
+    selected.push({ qty: remaining, cost: fallbackCost });
+  }
+  return selected;
+}
+
+function restoreCostLayers(product, item, offset, qty, reference) {
+  const layers = costLayersForRange(item, offset, qty);
+  layers.forEach(layer => addLot(product, layer.qty, layer.cost, reference));
+  return layers.reduce((sum, layer) => sum + layer.qty * layer.cost, 0);
 }
 
 function convertStockInput(product, receiptType, qty, unitsPerContainer) {
@@ -680,7 +750,7 @@ function renderDashboard(root) {
   const sales = state.sales.filter(sale => sale.date === date && sale.status !== "cancelada");
   const expenses = state.expenses.filter(expense => expense.date === date);
   const totalSales = sales.reduce((sum, sale) => sum + sale.total, 0);
-  const totalCost = sales.flatMap(sale => sale.items).reduce((sum, item) => sum + item.cost * item.qty, 0);
+  const totalCost = sales.flatMap(sale => sale.items).reduce((sum, item) => sum + itemNetCost(item), 0);
   const totalExpenses = expenses.reduce((sum, expense) => sum + expense.amount, 0);
   const lowProducts = state.products.filter(product => product.active && product.units <= product.minStock);
   root.innerHTML = `
@@ -1027,7 +1097,8 @@ function completeSale(paid, paymentMethod = "efectivo", ticketFolio = "", option
     const product = state.products.find(p => p.id === line.productId);
     const stockQty = cartStockNeeded(line);
     const unitPrice = line.unitPrice || product.price;
-    const totalCost = consumeLots(product, stockQty);
+    const consumption = consumeLotsDetailed(product, stockQty);
+    const totalCost = consumption.totalCost;
     const subtotal = unitPrice * line.qty;
     return {
       productId: product.id,
@@ -1039,6 +1110,7 @@ function completeSale(paid, paymentMethod = "efectivo", ticketFolio = "", option
       optionName: line.optionName || "Unidad",
       cost: totalCost / Math.max(1, stockQty),
       costTotal: totalCost,
+      costLayers: consumption.costLayers,
       price: unitPrice,
       subtotal,
       profit: subtotal - totalCost,
@@ -1541,7 +1613,7 @@ function saleDetailModal(saleId) {
     <p>Folio: ${sale.id}</p>
     <p>Nota/ticket: ${escapeHtml(sale.ticketFolio || "-")} | Vendedor: ${userName(sale.userId)} | Fecha: ${sale.date} ${sale.time} | Pago: ${paymentLabel(sale)}</p>
     <div class="table-wrap"><table><thead><tr><th>Producto</th><th>Forma de venta</th><th>Cant.</th><th>Salio del inventario</th>${sellerView ? "" : "<th>Lo que costo</th>"}<th>Precio</th><th>Total</th>${sellerView ? "" : "<th>Ganancia</th>"}</tr></thead>
-    <tbody>${sale.items.map(item => `<tr><td>${item.name}</td><td>${item.optionName || "Por pieza"}</td><td>${item.qty}</td><td>${item.stockQty || item.qty}</td>${sellerView ? "" : `<td>${money.format(item.costTotal ?? item.cost * item.qty)}</td>`}<td>${money.format(item.price)}</td><td>${money.format(item.subtotal)}</td>${sellerView ? "" : `<td>${money.format(item.profit)}</td>`}</tr>`).join("")}</tbody></table></div>
+    <tbody>${sale.items.map(item => `<tr><td>${item.name}</td><td>${item.optionName || "Por pieza"}</td><td>${item.qty - (item.returnedQty || 0)}</td><td>${itemStockQty(item) - (item.returnedStockQty || 0)}</td>${sellerView ? "" : `<td>${money.format(itemNetCost(item))}</td>`}<td>${money.format(item.price)}</td><td>${money.format(itemNetSold(item))}</td>${sellerView ? "" : `<td>${money.format(itemNetProfit(item))}</td>`}</tr>`).join("")}</tbody></table></div>
     <button class="ghost" data-close-modal>Cerrar</button>
   `);
 }
@@ -1580,6 +1652,7 @@ function cancelSale(saleId, authUser) {
     const product = state.products.find(p => p.id === item.productId);
     const before = product.units;
     product.units += qtyToRestore;
+    restoreCostLayers(product, item, item.returnedStockQty || 0, qtyToRestore, `Cancelacion ${sale.id}`);
     addMovement(product, "Entrada por cancelacion", before, qtyToRestore, product.units, sale.id);
   });
   sale.status = "cancelada";
@@ -1627,13 +1700,16 @@ function completeReturn(saleId, selected, authUser) {
     const product = state.products.find(item => item.id === productId);
     const optionQty = (line.stockQty || line.qty) / Math.max(1, line.qty);
     const stockReturnQty = qty * optionQty;
+    const previousReturnedStockQty = Number(line.returnedStockQty || 0);
     const before = product.units;
     product.units += stockReturnQty;
+    const returnedCost = restoreCostLayers(product, line, previousReturnedStockQty, stockReturnQty, `Devolucion ${sale.id}`);
     line.returnedQty = (line.returnedQty || 0) + qty;
-    line.returnedStockQty = (line.returnedStockQty || 0) + stockReturnQty;
+    line.returnedStockQty = previousReturnedStockQty + stockReturnQty;
+    line.returnedCostTotal = Number(line.returnedCostTotal || 0) + returnedCost;
     totalReturned += qty * line.price;
     addMovement(product, "Entrada por devolucion", before, stockReturnQty, product.units, sale.id);
-    return { productId, qty, price: line.price, subtotal: qty * line.price };
+    return { productId, qty, price: line.price, subtotal: qty * line.price, cost: returnedCost };
   });
   sale.total -= totalReturned;
   sale.status = "parcialmente devuelta";
@@ -1740,7 +1816,7 @@ function drawReports() {
   const date = document.querySelector("#report-date").value;
   const sales = state.sales.filter(sale => sale.date === date && sale.status !== "cancelada");
   const expenses = state.expenses.filter(expense => expense.date === date);
-  const rows = sales.flatMap(sale => sale.items.map(item => ({ type: `producto/${sale.paymentMethod || "efectivo"}`, date: sale.date, time: sale.time, name: `${item.name} (${item.optionName || "Unidad"}) - Nota ${sale.ticketFolio || "-"}`, qty: item.qty, cost: item.costTotal ?? item.cost * item.qty, sold: item.subtotal, profit: item.profit })));
+  const rows = sales.flatMap(sale => sale.items.map(item => ({ type: `producto/${sale.paymentMethod || "efectivo"}`, date: sale.date, time: sale.time, name: `${item.name} (${item.optionName || "Unidad"}) - Nota ${sale.ticketFolio || "-"}`, qty: item.qty - (item.returnedQty || 0), cost: itemNetCost(item), sold: itemNetSold(item), profit: itemNetProfit(item) })));
   expenses.forEach(expense => rows.push({ type: "gasto", date: expense.date, time: expense.time, name: expense.description, qty: 1, cost: 0, sold: -expense.amount, profit: -expense.amount }));
   const totals = rows.reduce((acc, row) => {
     acc.cost += row.cost;
