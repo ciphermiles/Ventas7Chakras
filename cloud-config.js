@@ -4,6 +4,6 @@ window.PUNTONEXO_CLOUD = {
   authMode: "supabase",
   authEmailDomain: "ventas7chakras.local",
   supabaseUrl: "https://gfzibyaurqfbwejtqhsk.supabase.co",
-  supabaseAnonKey: "sb_publishable_aEPMS0F4fChPKTyC-l_X3g_OHKir29K",
+  supabaseAnonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdmemlieWF1cnFmYndlanRxaHNrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA1MjI2MjcsImV4cCI6MjA5NjA5ODYyN30.J3IfV3EL4-WiYJ8VcwoTnX-pNd0HRYKDg8_4z0g2S0w",
   businessId: "tienda-principal"
 };

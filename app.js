@@ -699,6 +699,18 @@ function validateAuthorizationCode(code) {
   return { id: token.createdBy, name: creator?.name || "Supervisor/Admin", method: "token" };
 }
 
+function validateTokenOnly(code) {
+  const clean = String(code || "").trim();
+  if (!clean) return null;
+  const token = activeAuthTokens().find(item => item.code === clean);
+  if (!token) return null;
+  token.used = true;
+  const creator = state.users.find(user => user.id === token.createdBy);
+  logOperation("uso_token_corte", "authTokens", token.id, `Uso token para corte generado por ${creator?.name || "supervisor/admin"}`);
+  saveState();
+  return { id: token.createdBy, name: creator?.name || "Supervisor/Admin", method: "token" };
+}
+
 function navItems() {
   const items = [
     { id: "dashboard", label: "Dashboard" },
@@ -2009,12 +2021,37 @@ function cashSummary(cash) {
       <h3>Notas registradas en esta caja</h3>
       ${sales.length ? `<div class="table-wrap"><table><thead><tr><th>Nota</th><th>Hora</th><th>Pago</th><th>Total</th></tr></thead><tbody>${noteRows}</tbody></table></div>` : `<p class="empty">No hay notas registradas.</p>`}
     </div>
-    <button class="primary" id="close-cash">Cerrar caja / corte</button>
+    <button class="primary" id="close-cash">Cerrar caja / corte con token</button>
   `;
 }
 
 function closeCash() {
   const cash = openCash();
+  if (!cash) return toast("No hay caja abierta");
+  authorizeCashCloseModal(authUser => completeCloseCash(cash.id, authUser));
+}
+
+function authorizeCashCloseModal(onSuccess) {
+  showModal(`
+    <h2>Autorizar corte de caja</h2>
+    <p class="muted">Para cerrar caja se requiere un token temporal de un solo uso generado por administrador o supervisor.</p>
+    <form id="cash-close-auth-form" class="stack">
+      <label>Token de cierre <input name="authCode" inputmode="numeric" required placeholder="6 digitos"></label>
+      <div class="actions"><button class="primary">Autorizar corte</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
+    </form>
+  `);
+  document.querySelector("#cash-close-auth-form").addEventListener("submit", event => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.target));
+    const authUser = validateTokenOnly(data.authCode);
+    if (!authUser) return toast("Token invalido o expirado");
+    onSuccess(authUser);
+  });
+}
+
+function completeCloseCash(cashId, authUser) {
+  const cash = openCash();
+  if (!cash || cash.id !== cashId) return toast("No hay caja abierta");
   const currentSales = state.sales.filter(sale => sale.cashId === cash.id && sale.status !== "cancelada");
   const sales = currentSales.reduce((sum, sale) => sum + salePaymentAmount(sale, "efectivo"), 0);
   const ticketSales = currentSales.reduce((sum, sale) => sum + salePaymentAmount(sale, "tarjeta") + salePaymentAmount(sale, "transferencia"), 0);
@@ -2025,8 +2062,10 @@ function closeCash() {
   cash.finalAmount = cash.initialAmount + sales - expenses;
   cash.ticketAmount = ticketSales;
   cash.expectedWithTickets = cash.finalAmount + ticketSales;
-  logOperation("cierre_caja", "cashRegisters", cash.id, `Cierre por ${money.format(cash.finalAmount)}`);
+  cash.closedByAuthorization = authUser.id;
+  logOperation("cierre_caja", "cashRegisters", cash.id, `Cierre por ${money.format(cash.finalAmount)} autorizado por ${authUser.name}`);
   saveState();
+  closeModal();
   render();
   toast("Caja cerrada");
 }
@@ -2034,20 +2073,35 @@ function closeCash() {
 function renderReports(root) {
   root.innerHTML = `
     <div class="panel">
-      <div class="toolbar"><label>Fecha <input type="date" id="report-date" value="${today()}"></label></div>
+      <div class="toolbar">
+        <label>Desde <input type="date" id="report-start" value="${today()}"></label>
+        <label>Hasta <input type="date" id="report-end" value="${today()}"></label>
+      </div>
       <div id="report-content"></div>
     </div>
   `;
-  document.querySelector("#report-date").addEventListener("change", drawReports);
+  document.querySelector("#report-start").addEventListener("change", drawReports);
+  document.querySelector("#report-end").addEventListener("change", drawReports);
   drawReports();
 }
 
 function drawReports() {
-  const date = document.querySelector("#report-date").value;
-  const sales = state.sales.filter(sale => sale.date === date && sale.status !== "cancelada");
-  const expenses = state.expenses.filter(expense => expense.date === date);
+  const start = document.querySelector("#report-start").value;
+  const end = document.querySelector("#report-end").value;
+  const sales = state.sales.filter(sale => sale.date >= start && sale.date <= end && sale.status !== "cancelada");
+  const expenses = state.expenses.filter(expense => expense.date >= start && expense.date <= end);
   const rows = sales.flatMap(sale => sale.items.map(item => ({ type: `producto/${sale.paymentMethod || "efectivo"}`, date: sale.date, time: sale.time, name: `${item.name} (${item.optionName || "Unidad"}) - Nota ${sale.ticketFolio || "-"}`, qty: item.qty - (item.returnedQty || 0), cost: itemNetCost(item), sold: itemNetSold(item), profit: itemNetProfit(item) })));
   expenses.forEach(expense => rows.push({ type: "gasto", date: expense.date, time: expense.time, name: expense.description, qty: 1, cost: 0, sold: -expense.amount, profit: -expense.amount }));
+  const cashTotal = sales.reduce((sum, sale) => sum + salePaymentAmount(sale, "efectivo"), 0);
+  const cardTotal = sales.reduce((sum, sale) => sum + salePaymentAmount(sale, "tarjeta"), 0);
+  const transferTotal = sales.reduce((sum, sale) => sum + salePaymentAmount(sale, "transferencia"), 0);
+  const sellerTotals = sales.reduce((map, sale) => {
+    const current = map.get(sale.userId) || { userId: sale.userId, sales: 0, total: 0 };
+    current.sales += 1;
+    current.total += sale.total;
+    map.set(sale.userId, current);
+    return map;
+  }, new Map());
   const totals = rows.reduce((acc, row) => {
     acc.cost += row.cost;
     acc.sold += row.sold;
@@ -2060,7 +2114,22 @@ function drawReports() {
       ${metric("Venta total", money.format(totals.sold))}
       ${metric("Ganancia neta", money.format(totals.profit))}
     </div>
-    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Tipo</th><th>Nombre</th><th>Hora</th><th>Cantidad</th><th>Lo que costo</th><th>Venta o gasto</th><th>Ganancia</th></tr></thead><tbody>${rows.map(row => `<tr><td>${row.type}</td><td>${row.name}</td><td>${row.time}</td><td>${row.qty}</td><td>${money.format(row.cost)}</td><td>${money.format(row.sold)}</td><td>${money.format(row.profit)}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">Sin movimientos para esta fecha.</p>`}
+    <div class="grid cols-3">
+      ${metric("Efectivo", money.format(cashTotal))}
+      ${metric("Tarjeta", money.format(cardTotal))}
+      ${metric("Transferencia", money.format(transferTotal))}
+    </div>
+    <div class="grid cols-2">
+      <div class="panel">
+        <h2>Productos mas vendidos</h2>
+        ${topSoldProducts(sales, 10).length ? topProductsTable(topSoldProducts(sales, 10)) : `<p class="empty">Sin ventas en el periodo.</p>`}
+      </div>
+      <div class="panel">
+        <h2>Ventas por usuario</h2>
+        ${sellerTotals.size ? `<div class="table-wrap"><table><thead><tr><th>Usuario</th><th>Ventas</th><th>Total</th></tr></thead><tbody>${[...sellerTotals.values()].map(row => `<tr><td>${userName(row.userId)}</td><td>${row.sales}</td><td>${money.format(row.total)}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">Sin ventas por usuario.</p>`}
+      </div>
+    </div>
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Tipo</th><th>Nombre</th><th>Fecha</th><th>Hora</th><th>Cantidad</th><th>Lo que costo</th><th>Venta o gasto</th><th>Ganancia</th></tr></thead><tbody>${rows.map(row => `<tr><td>${row.type}</td><td>${row.name}</td><td>${row.date}</td><td>${row.time}</td><td>${row.qty}</td><td>${money.format(row.cost)}</td><td>${money.format(row.sold)}</td><td>${money.format(row.profit)}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">Sin movimientos para este periodo.</p>`}
   `;
 }
 
@@ -2324,7 +2393,7 @@ function renderBackup(root) {
       <div class="panel">
         <h2>Respaldo de informacion</h2>
         <p class="muted">Descarga una copia de productos, ventas, cajas, usuarios, gastos y bitacora.</p>
-        <button class="primary" id="make-backup">Generar respaldo</button>
+        <div class="actions"><button class="primary" id="make-backup">Generar respaldo</button><button class="ghost" id="load-cloud-backups">Actualizar lista nube</button></div>
       </div>
       <div class="panel">
         <h2>Restaurar respaldo</h2>
@@ -2335,7 +2404,9 @@ function renderBackup(root) {
     <div class="panel"><h2>Historial de respaldos</h2>${backupTable()}</div>
   `;
   document.querySelector("#make-backup").addEventListener("click", makeBackup);
+  document.querySelector("#load-cloud-backups").addEventListener("click", loadCloudBackups);
   document.querySelector("#restore-backup").addEventListener("click", restoreBackup);
+  document.querySelectorAll("[data-download-backup]").forEach(button => button.addEventListener("click", () => downloadBackupById(button.dataset.downloadBackup)));
 }
 
 async function makeBackup() {
@@ -2394,6 +2465,52 @@ async function saveBackupToCloud(backup) {
   }
 }
 
+async function loadCloudBackups() {
+  const client = getCloudClient();
+  if (!client) return toast("La nube no esta configurada");
+  const { data, error } = await client
+    .from("pos_backups")
+    .select("id, backup_type, created_by, filename, created_at")
+    .eq("business_id", cloudBusinessId)
+    .order("created_at", { ascending: false })
+    .limit(30);
+  if (error) return toast("No se pudo cargar lista de respaldos");
+  state.backups = data.map(item => ({
+    id: item.id,
+    kind: item.backup_type,
+    date: item.created_at.slice(0, 10),
+    time: new Date(item.created_at).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" }),
+    userId: item.created_by,
+    filename: item.filename,
+    cloud: true
+  }));
+  saveState();
+  render();
+  toast("Lista de respaldos actualizada");
+}
+
+async function downloadBackupById(id) {
+  const local = state.backups.find(backup => backup.id === id);
+  const client = getCloudClient();
+  if (!client) return toast("Solo se pueden descargar respaldos historicos desde la nube");
+  const { data, error } = await client
+    .from("pos_backups")
+    .select("id, backup_type, created_by, filename, state, created_at")
+    .eq("id", id)
+    .single();
+  if (error || !data) return toast("No se pudo descargar el respaldo");
+  downloadBackup({
+    id: data.id,
+    kind: data.backup_type,
+    businessId: cloudBusinessId,
+    date: data.created_at.slice(0, 10),
+    time: new Date(data.created_at).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" }),
+    userId: data.created_by,
+    filename: data.filename || local?.filename || `respaldo-${data.id}.json`,
+    data: data.state
+  });
+}
+
 async function maybeAutoBackup() {
   if (autoBackupBusy || !session || !cloudMode) return;
   const key = `lastAutoBackup:${cloudBusinessId}`;
@@ -2415,6 +2532,7 @@ async function maybeAutoBackup() {
 function restoreBackup() {
   const file = document.querySelector("#restore-file").files[0];
   if (!file) return toast("Selecciona un archivo");
+  if (!confirm("Restaurar un respaldo reemplazara la informacion actual del sistema. Confirma que tienes una copia reciente antes de continuar.")) return;
   const reader = new FileReader();
   reader.onload = () => {
     try {
@@ -2433,7 +2551,7 @@ function restoreBackup() {
 
 function backupTable() {
   if (!state.backups.length) return `<p class="empty">Aun no hay respaldos registrados.</p>`;
-  return `<div class="table-wrap"><table><thead><tr><th>Archivo</th><th>Fecha</th><th>Hora</th><th>Usuario</th></tr></thead><tbody>${state.backups.map(backup => `<tr><td>${backup.filename}</td><td>${backup.date}</td><td>${backup.time}</td><td>${userName(backup.userId)}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>Archivo</th><th>Tipo</th><th>Fecha</th><th>Hora</th><th>Usuario</th><th>Acciones</th></tr></thead><tbody>${state.backups.map(backup => `<tr><td>${backup.filename}</td><td>${backup.kind || "manual"}</td><td>${backup.date}</td><td>${backup.time}</td><td>${userName(backup.userId)}</td><td><button class="tiny" data-download-backup="${backup.id}">Descargar</button></td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function expenseTable(expenses) {

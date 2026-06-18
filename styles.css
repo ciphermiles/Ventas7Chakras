@@ -199,3 +199,25 @@ td { font-size: 14px; }
   .nav { grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); }
   .grid.cols-2, .grid.cols-3, .grid.cols-4, .pos-layout, .login-card { grid-template-columns: 1fr; }
 }
+
+@media (max-width: 640px) {
+  body { font-size: 15px; }
+  h1 { font-size: 24px; }
+  h2 { font-size: 19px; }
+  .content { padding: 14px; }
+  .sidebar { padding: 14px; gap: 12px; }
+  .nav { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .nav button { padding: 9px 8px; min-height: 38px; }
+  .toolbar { display: grid; grid-template-columns: 1fr; }
+  .toolbar > * { min-width: 0; }
+  .product-list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: none; }
+  .product-button { min-height: 102px; padding: 12px; }
+  .cart-line { grid-template-columns: 1fr; align-items: stretch; }
+  .cart-line input { max-width: none; }
+  .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .actions button { width: 100%; }
+  .modal { padding: 10px; align-items: start; }
+  .modal-card { max-height: 95vh; }
+  th, td { padding: 8px; font-size: 13px; }
+  .metric strong { font-size: 20px; }
+}
