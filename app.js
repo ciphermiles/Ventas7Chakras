@@ -38,11 +38,14 @@ sessionStorage.setItem("posClientId", clientId);
 const serverMode = location.protocol === "http:" || location.protocol === "https:";
 const cloudConfig = window.PUNTONEXO_CLOUD || {};
 const cloudMode = Boolean(cloudConfig.enabled && cloudConfig.supabaseUrl && cloudConfig.supabaseAnonKey && window.supabase);
+const secureCloudAuth = Boolean(cloudMode && cloudConfig.authMode === "supabase");
 const cloudBusinessId = cloudConfig.businessId || "default-store";
+const authEmailDomain = cloudConfig.authEmailDomain || `${cloudBusinessId}.pos.local`;
 let cloudClient = null;
 let cloudChannel = null;
 let accessKey = sessionStorage.getItem("posAccessKey") || "";
 let syncingFromServer = false;
+let autoBackupBusy = false;
 let realtimeSource = null;
 
 let state = loadState();
@@ -76,6 +79,42 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function cloneData(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function authEmailForUsername(username = "") {
+  const clean = String(username || "").trim().toLowerCase();
+  if (!clean) return "";
+  return clean.includes("@") ? clean : `${clean}@${authEmailDomain}`;
+}
+
+function seedUser(user) {
+  const normalized = { ...user, authEmail: user.authEmail || authEmailForUsername(user.username) };
+  if (secureCloudAuth) delete normalized.password;
+  return normalized;
+}
+
+function stateForStorage(source = state) {
+  return secureCloudAuth ? stateForCloud(source) : source;
+}
+
+function stateForCloud(source = state) {
+  const copy = cloneData(source);
+  copy.users = (copy.users || []).map(user => {
+    const clean = { ...user, authEmail: user.authEmail || authEmailForUsername(user.username) };
+    delete clean.password;
+    return clean;
+  });
+  return copy;
+}
+
+function backupStateSnapshot() {
+  const copy = stateForCloud(state);
+  copy.backups = (copy.backups || []).map(({ data, ...metadata }) => metadata);
+  return copy;
+}
+
 function siteSettings() {
   return state.settings || seedState().settings;
 }
@@ -92,7 +131,7 @@ function loadState() {
   const stored = localStorage.getItem(STORAGE_KEY);
   if (stored) return normalizeState(JSON.parse(stored));
   const initial = seedState();
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(initial));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(stateForStorage(initial)));
   return initial;
 }
 
@@ -122,14 +161,17 @@ function normalizeUser(user) {
   user.role = user.role || "vendedor";
   if (user.role === "owner") user.role = "master";
   user.active = user.active !== false;
+  user.username = user.username || user.email || user.authEmail || "";
+  user.authEmail = user.authEmail || authEmailForUsername(user.username);
   user.access = { ...defaultAccessForRole(user.role), ...(user.access || {}) };
   if (user.role === "master") user.access = { ...DEFAULT_ACCESS.master };
+  if (secureCloudAuth) delete user.password;
   return user;
 }
 
 function ensureMasterUser(users) {
   if (!users.some(user => user.role === "master" || user.isMaster)) {
-    users.unshift(normalizeUser({ id: uid("usr"), name: "Dueno del sistema", username: "master", password: "master123", role: "master", active: true }));
+    users.unshift(normalizeUser(seedUser({ id: uid("usr"), name: "Dueno del sistema", username: "master", password: "master123", role: "master", active: true })));
   }
   return users;
 }
@@ -137,6 +179,10 @@ function ensureMasterUser(users) {
 function normalizeProduct(product) {
   product.stockUnit = product.stockUnit || "pieza";
   product.aliasCodes = product.aliasCodes || [];
+  product.supplier = product.supplier || "";
+  product.location = product.location || "";
+  product.notes = product.notes || "";
+  product.priceHistory = Array.isArray(product.priceHistory) ? product.priceHistory : [];
   product.packageUnits = Number(product.packageUnits || 0);
   product.packagePrice = Number(product.packagePrice || 0);
   product.wholesaleMin = Number(product.wholesaleMin || 0);
@@ -148,7 +194,7 @@ function normalizeProduct(product) {
 }
 
 function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(stateForStorage(state)));
   if (cloudMode && !syncingFromServer) {
     pushStateToCloud();
     return;
@@ -180,13 +226,15 @@ async function syncStateFromCloud() {
       const hadMaster = Array.isArray(data.state.users) && data.state.users.some(user => user.role === "master" || user.isMaster);
       syncingFromServer = true;
       state = normalizeState(data.state);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(stateForStorage(state)));
       syncingFromServer = false;
       render();
       if (!hadMaster) await pushStateToCloud();
+      maybeAutoBackup();
       return true;
     }
     await pushStateToCloud();
+    maybeAutoBackup();
     return true;
   } catch (error) {
     console.warn("No se pudo sincronizar con nube:", error.message);
@@ -203,7 +251,7 @@ async function pushStateToCloud() {
       .from("pos_state")
       .upsert({
         business_id: cloudBusinessId,
-        state,
+        state: stateForCloud(),
         updated_by: clientId,
         updated_at: new Date().toISOString()
       }, { onConflict: "business_id" });
@@ -339,11 +387,11 @@ function seedState() {
     },
     announcements: [],
     users: [
-      { id: master, name: "Dueno del sistema", username: "master", password: "master123", role: "master", active: true, access: { ...DEFAULT_ACCESS.master } },
-      { id: admin, name: "Omar", username: "admin", password: "adminO123", role: "admin", active: true },
-      { id: supervisor1, name: "Sonia", username: "supervisor1", password: "super1123", role: "supervisor", active: true },
-      { id: supervisor2, name: "Toño F", username: "supervisor2", password: "super2123", role: "supervisor", active: true },
-      { id: vendedor, name: "Cajero", username: "vendedor", password: "vend123", role: "vendedor", active: true }
+      seedUser({ id: master, name: "Dueno del sistema", username: "master", password: "master123", role: "master", active: true, access: { ...DEFAULT_ACCESS.master } }),
+      seedUser({ id: admin, name: "Omar", username: "admin", password: "adminO123", role: "admin", active: true }),
+      seedUser({ id: supervisor1, name: "Sonia", username: "supervisor1", password: "super1123", role: "supervisor", active: true }),
+      seedUser({ id: supervisor2, name: "Toño F", username: "supervisor2", password: "super2123", role: "supervisor", active: true }),
+      seedUser({ id: vendedor, name: "Cajero", username: "vendedor", password: "vend123", role: "vendedor", active: true })
     ],
     categories,
     products,
@@ -420,10 +468,40 @@ function categoryName(id) {
 
 function unitLabel(product, qty = product.units) {
   const unit = product.stockUnit || "pieza";
+  if (unit === "kilogramo") return `${qty} kg`;
   if (unit === "gramo") return `${qty} g`;
   if (unit === "miligramo") return `${qty} mg`;
   if (unit === "paquete") return `${qty} paquete(s)`;
   return `${qty} pieza(s)`;
+}
+
+function recordProductPriceChange(product, beforeCost, beforePrice, reason = "Actualizacion") {
+  const afterCost = Number(product.cost || 0);
+  const afterPrice = Number(product.price || 0);
+  if (Number(beforeCost || 0) === afterCost && Number(beforePrice || 0) === afterPrice) return;
+  product.priceHistory = product.priceHistory || [];
+  product.priceHistory.unshift({
+    id: uid("price"),
+    beforeCost: Number(beforeCost || 0),
+    afterCost,
+    beforePrice: Number(beforePrice || 0),
+    afterPrice,
+    reason,
+    userId: session?.userId || "sistema",
+    date: today(),
+    time: nowTime()
+  });
+  product.priceHistory = product.priceHistory.slice(0, 25);
+}
+
+function isWeightProduct(product) {
+  return ["kilogramo", "gramo", "miligramo"].includes(product.stockUnit);
+}
+
+function weightSaleStep(product) {
+  if (product.stockUnit === "kilogramo") return 0.001;
+  if (product.stockUnit === "gramo") return 0.001;
+  return 1;
 }
 
 function saleOptions(product) {
@@ -548,9 +626,11 @@ function restoreCostLayers(product, item, offset, qty, reference) {
 
 function convertStockInput(product, receiptType, qty, unitsPerContainer) {
   if (receiptType === "box" || receiptType === "largePackage") return qty * unitsPerContainer;
-  if (receiptType === "kg") return product.stockUnit === "miligramo" ? qty * 1000000 : qty * 1000;
-  if (receiptType === "g") return product.stockUnit === "miligramo" ? qty * 1000 : qty;
-  if (receiptType === "mg") return product.stockUnit === "gramo" ? qty / 1000 : qty;
+  if (["kg", "g", "mg"].includes(receiptType) && isWeightProduct(product)) {
+    const milligrams = { kg: 1000000, g: 1000, mg: 1 };
+    const stockUnit = { kilogramo: 1000000, gramo: 1000, miligramo: 1 };
+    return qty * milligrams[receiptType] / stockUnit[product.stockUnit];
+  }
   return qty;
 }
 
@@ -717,18 +797,60 @@ function renderLogin() {
   document.querySelector(".login-card .eyebrow").textContent = siteSettings().institutionName;
   document.querySelector(".login-card .muted").textContent = siteSettings().welcomeText;
   document.title = siteSettings().siteName;
-  document.querySelector("#login-form").addEventListener("submit", event => {
-    event.preventDefault();
-    const data = Object.fromEntries(new FormData(event.target));
-    const user = state.users.find(item => item.username === data.username && item.password === data.password && item.active);
-    if (!user) return toast("Usuario o contrasena incorrectos");
-    session = { userId: user.id, startedAt: nowIso(), accounts: [{ id: "cuenta-1", name: "Cuenta 1", items: [] }] };
-    sessionStorage.setItem("posSession", JSON.stringify(session));
-    logOperation("login", "users", user.id, "Inicio de sesion", user.id);
+  document.querySelector("#login-form").addEventListener("submit", handleLogin);
+}
+
+async function handleLogin(event) {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(event.target));
+  if (secureCloudAuth) {
+    await loginWithSupabase(data.username, data.password);
+    return;
+  }
+  const user = state.users.find(item => item.username === data.username && item.password === data.password && item.active);
+  if (!user) return toast("Usuario o contrasena incorrectos");
+  startSessionForUser(user);
+}
+
+async function loginWithSupabase(username, password) {
+  const client = getCloudClient();
+  const email = authEmailForUsername(username);
+  if (!client || !email) return toast("Configuracion de nube incompleta");
+  const { data, error } = await client.auth.signInWithPassword({ email, password });
+  if (error) return toast("Usuario o contrasena incorrectos");
+  await syncStateFromCloud();
+  let user = state.users.find(item =>
+    item.authUserId === data.user.id ||
+    String(item.authEmail || "").toLowerCase() === email ||
+    String(item.username || "").toLowerCase() === String(username || "").toLowerCase()
+  );
+  if (!user) {
+    user = normalizeUser({ id: uid("usr"), authUserId: data.user.id, authEmail: email, username, name: username, role: "vendedor", active: false });
+    state.users.push(user);
     saveState();
-    currentView = user.role === "vendedor" ? "pos" : "dashboard";
-    render();
-  });
+    await client.auth.signOut();
+    return toast("La cuenta existe en Supabase, pero no tiene permisos en el sistema");
+  }
+  if (!user.active) {
+    await client.auth.signOut();
+    return toast("Usuario inactivo");
+  }
+  if (!user.authUserId) {
+    user.authUserId = data.user.id;
+    user.authEmail = user.authEmail || email;
+    saveState();
+  }
+  startSessionForUser(user);
+  maybeAutoBackup();
+}
+
+function startSessionForUser(user) {
+  session = { userId: user.id, authUserId: user.authUserId || null, startedAt: nowIso(), accounts: [{ id: "cuenta-1", name: "Cuenta 1", items: [] }] };
+  sessionStorage.setItem("posSession", JSON.stringify(session));
+  logOperation("login", "users", user.id, "Inicio de sesion", user.id);
+  saveState();
+  currentView = user.role === "vendedor" ? "pos" : "dashboard";
+  render();
 }
 
 function logout() {
@@ -740,6 +862,7 @@ function logout() {
   }
   logOperation("logout", "users", session.userId, "Cierre de sesion");
   saveState();
+  if (secureCloudAuth) getCloudClient()?.auth.signOut();
   session = null;
   sessionStorage.removeItem("posSession");
   render();
@@ -753,12 +876,29 @@ function renderDashboard(root) {
   const totalCost = sales.flatMap(sale => sale.items).reduce((sum, item) => sum + itemNetCost(item), 0);
   const totalExpenses = expenses.reduce((sum, expense) => sum + expense.amount, 0);
   const lowProducts = state.products.filter(product => product.active && product.units <= product.minStock);
+  const cashSales = sales.reduce((sum, sale) => sum + salePaymentAmount(sale, "efectivo"), 0);
+  const cardTransferSales = sales.reduce((sum, sale) => sum + salePaymentAmount(sale, "tarjeta") + salePaymentAmount(sale, "transferencia"), 0);
+  const topProducts = topSoldProducts(sales, 6);
+  const noMovementProducts = productsWithoutMovement(30).slice(0, 6);
   root.innerHTML = `
     <div class="grid cols-4">
       ${metric("Ventas del dia", money.format(totalSales))}
       ${metric("Ganancia antes de gastos", money.format(totalSales - totalCost))}
       ${metric("Gastos del dia", money.format(totalExpenses))}
       ${metric("Ganancia neta", money.format(totalSales - totalCost - totalExpenses))}
+    </div>
+    <div class="grid cols-2">
+      <div class="panel">
+        <h2>Resumen de cobros</h2>
+        <div class="grid cols-2">
+          ${metric("Efectivo", money.format(cashSales))}
+          ${metric("Tarjeta / transferencia", money.format(cardTransferSales))}
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Mas vendido hoy</h2>
+        ${topProducts.length ? topProductsTable(topProducts) : `<p class="empty">Aun no hay ventas hoy.</p>`}
+      </div>
     </div>
     <div class="grid cols-2">
       <div class="panel">
@@ -784,6 +924,10 @@ function renderDashboard(root) {
       <div class="panel"><h2>Ultimas ventas</h2>${salesTable(state.sales.slice(0, 7), false)}</div>
       <div class="panel"><h2>Cajas abiertas</h2>${cashTable(state.cashRegisters.filter(cash => cash.status === "abierta"))}</div>
     </div>
+    <div class="panel">
+      <h2>Productos sin venta reciente</h2>
+      ${noMovementProducts.length ? productStockTable(noMovementProducts) : `<p class="empty">No hay productos activos sin movimiento reciente.</p>`}
+    </div>
   `;
   document.querySelector("#edit-site-shortcut")?.addEventListener("click", () => {
     currentView = "site";
@@ -793,6 +937,30 @@ function renderDashboard(root) {
 
 function metric(label, value) {
   return `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`;
+}
+
+function topSoldProducts(sales, limit = 5) {
+  const totals = new Map();
+  sales.forEach(sale => sale.items.forEach(item => {
+    const current = totals.get(item.productId) || { name: item.name, qty: 0, sold: 0 };
+    current.qty += Number(item.qty || 0) - Number(item.returnedQty || 0);
+    current.sold += itemNetSold(item);
+    totals.set(item.productId, current);
+  }));
+  return [...totals.values()].filter(item => item.qty > 0).sort((a, b) => b.sold - a.sold).slice(0, limit);
+}
+
+function productsWithoutMovement(days = 30) {
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  const soldIds = new Set(state.sales
+    .filter(sale => sale.status !== "cancelada" && new Date(sale.createdAt || sale.date) >= since)
+    .flatMap(sale => sale.items.map(item => item.productId)));
+  return state.products.filter(product => product.active && !soldIds.has(product.id));
+}
+
+function topProductsTable(products) {
+  return `<div class="table-wrap"><table><thead><tr><th>Producto</th><th>Cantidad</th><th>Venta</th></tr></thead><tbody>${products.map(product => `<tr><td>${escapeHtml(product.name)}</td><td>${product.qty}</td><td>${money.format(product.sold)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function renderPos(root) {
@@ -924,9 +1092,11 @@ function addToCart(productId, optionId = "base") {
   const account = currentAccount();
   const line = account.items.find(item => item.productId === productId && item.optionId === option.id);
   const currentQty = line?.qty || 0;
-  if ((currentQty + 1) * option.quantity > product.units) return toast("No alcanza la cantidad disponible");
-  if (line) line.qty += 1;
-  else account.items.push({ productId, optionId: option.id, optionName: option.name, unitQuantity: option.quantity, unitPrice: option.price, qty: 1 });
+  const availableSaleQty = product.units / option.quantity;
+  const increment = Math.min(1, Math.max(0, availableSaleQty - currentQty));
+  if (increment <= 0) return toast("No alcanza la cantidad disponible");
+  if (line) line.qty += increment;
+  else account.items.push({ productId, optionId: option.id, optionName: option.name, unitQuantity: option.quantity, unitPrice: option.price, qty: increment });
   saveSession();
   render();
 }
@@ -954,9 +1124,13 @@ function cartHtml(account) {
   if (!account.items.length) return `<p class="empty">Agrega productos a la cuenta.</p>`;
   return account.items.map(item => {
     const product = state.products.find(p => p.id === item.productId);
+    const step = isWeightProduct(product) ? weightSaleStep(product) : 1;
+    const max = isWeightProduct(product)
+      ? product.units / (item.unitQuantity || 1)
+      : Math.floor(product.units / (item.unitQuantity || 1));
     return `<div class="cart-line">
       <div><strong>${product.name}</strong><br><small class="muted">${item.optionName || "Por pieza"} | sale del inventario: ${unitLabel(product, cartStockNeeded(item))}</small></div>
-      <input data-cart-qty="${product.id}|${item.optionId || "base"}" type="number" min="1" max="${Math.floor(product.units / (item.unitQuantity || 1))}" value="${item.qty}">
+      <input data-cart-qty="${product.id}|${item.optionId || "base"}" type="number" min="${step}" step="${step}" max="${max}" value="${item.qty}">
       <strong>${money.format((item.unitPrice || product.price) * item.qty)}</strong>
       <button class="tiny danger" data-remove-cart="${product.id}|${item.optionId || "base"}">X</button>
     </div>`;
@@ -969,7 +1143,11 @@ function bindCartEvents() {
       const [productId, optionId] = input.dataset.cartQty.split("|");
       const product = state.products.find(p => p.id === productId);
       const line = currentAccount().items.find(item => item.productId === product.id && (item.optionId || "base") === optionId);
-      const value = Math.max(1, Math.min(Number(input.value), Math.floor(product.units / (line.unitQuantity || 1))));
+      const minimum = isWeightProduct(product) ? weightSaleStep(product) : 1;
+      const maximum = isWeightProduct(product)
+        ? product.units / (line.unitQuantity || 1)
+        : Math.floor(product.units / (line.unitQuantity || 1));
+      const value = Math.max(minimum, Math.min(Number(input.value), maximum));
       line.qty = value;
       saveSession();
       render();
@@ -1207,6 +1385,7 @@ function renderInventory(root) {
         <label>Buscar producto <input id="inventory-search" placeholder="Nombre, codigo o tipo"></label>
         <button class="primary compact" id="new-product">Agregar producto</button>
         ${can("admin", "supervisor") ? `<button class="ghost compact" id="new-category">Nuevo tipo</button>` : ""}
+        ${can("admin", "supervisor") ? `<label><input id="show-inactive-products" type="checkbox"> Mostrar eliminados</label>` : ""}
       </div>
       <div id="inventory-table"></div>
     </div>
@@ -1217,6 +1396,7 @@ function renderInventory(root) {
     </div>` : ""}
   `;
   document.querySelector("#inventory-search").addEventListener("input", drawInventoryTable);
+  document.querySelector("#show-inactive-products")?.addEventListener("change", drawInventoryTable);
   document.querySelector("#new-product").addEventListener("click", () => productModal());
   document.querySelector("#new-category")?.addEventListener("click", categoryModal);
   drawInventoryTable();
@@ -1224,7 +1404,9 @@ function renderInventory(root) {
 
 function drawInventoryTable() {
   const search = document.querySelector("#inventory-search")?.value.toLowerCase() || "";
+  const showInactive = document.querySelector("#show-inactive-products")?.checked || false;
   const products = state.products.filter(product => {
+    if (!product.active && !showInactive) return false;
     const text = `${product.name} ${product.code} ${categoryName(product.categoryId)}`.toLowerCase();
     return text.includes(search);
   });
@@ -1242,13 +1424,13 @@ function productTable(products) {
       <td>${product.name} ${product.active ? "" : `<span class="badge danger">Inactivo</span>`}</td>
       <td>${product.code}</td>
       <td>${categoryName(product.categoryId)}</td>
-      <td><span class="badge ${product.units <= product.minStock ? "warn" : "ok"}">${unitLabel(product)}</span><br><small class="muted">Avisar en: ${unitLabel(product, product.minStock)}</small></td>
+      <td><span class="badge ${product.units <= product.minStock ? "warn" : "ok"}">${unitLabel(product)}</span><br><small class="muted">Avisar en: ${unitLabel(product, product.minStock)}</small>${product.location ? `<br><small class="muted">Ubicacion: ${escapeHtml(product.location)}</small>` : ""}</td>
       <td>${money.format(product.cost)}</td>
       <td>${money.format(product.price)}</td>
       <td>${saleOptions(product).map(option => escapeHtml(option.name)).join(", ")}</td>
       <td><div class="actions">
-        <button class="tiny" data-stock-product="${product.id}">Entrada</button>
-        ${can("admin", "supervisor") ? `<button class="tiny" data-edit-product="${product.id}">Editar</button><button class="tiny danger" data-delete-product="${product.id}">${product.active ? "Desactivar" : "Activar"}</button>` : ""}
+        ${product.active ? `<button class="tiny" data-stock-product="${product.id}">Entrada</button>` : ""}
+        ${can("admin", "supervisor") ? `<button class="tiny" data-edit-product="${product.id}">Modificar</button><button class="tiny ${product.active ? "danger" : "warning"}" data-delete-product="${product.id}">${product.active ? "Eliminar" : "Restaurar"}</button>` : ""}
       </div></td>
     </tr>`).join("")}</tbody></table></div>`;
 }
@@ -1260,7 +1442,7 @@ function productStockTable(products) {
 function productModal(productId) {
   if (!can("admin", "supervisor") && productId) return toast("Solo administracion puede editar productos");
   const product = normalizeProduct(state.products.find(item => item.id === productId) || {});
-  const mode = product.stockUnit === "gramo" || product.stockUnit === "miligramo" ? "peso" : product.packageUnits > 1 || product.packagePrice > 0 || product.wholesaleMin > 0 ? "paquete" : "unidad";
+  const mode = isWeightProduct(product) ? "peso" : product.packageUnits > 1 || product.packagePrice > 0 || product.wholesaleMin > 0 ? "paquete" : "unidad";
   showModal(`
     <h2>${productId ? "Editar producto" : "Agregar producto"}</h2>
     <form id="product-form" class="stack">
@@ -1292,7 +1474,8 @@ function productModal(productId) {
         </label>
         <label id="weight-unit-label">Como se guardara la cantidad
           <select name="weightUnit">
-            <option value="gramo" ${product.stockUnit !== "miligramo" ? "selected" : ""}>Gramos</option>
+            <option value="kilogramo" ${product.stockUnit === "kilogramo" ? "selected" : ""}>Kilogramos</option>
+            <option value="gramo" ${product.stockUnit === "gramo" || !isWeightProduct(product) ? "selected" : ""}>Gramos</option>
             <option value="miligramo" ${product.stockUnit === "miligramo" ? "selected" : ""}>Miligramos</option>
           </select>
         </label>
@@ -1300,6 +1483,9 @@ function productModal(productId) {
         <label>Cuanto costo comprarlo <input name="cost" type="number" min="0" step="0.01" required value="${product.cost ?? 0}"></label>
         <label>Precio al publico <input name="price" type="number" min="0" step="0.01" required value="${product.price ?? 0}"></label>
         <label>Avisar cuando queden <input name="minStock" type="number" min="0" step="0.001" required value="${product.minStock ?? 1}"></label>
+        <label>Proveedor <input name="supplier" value="${escapeHtml(product.supplier || "")}" placeholder="Opcional"></label>
+        <label>Ubicacion <input name="location" value="${escapeHtml(product.location || "")}" placeholder="Anaquel, caja o zona"></label>
+        <label class="wide">Observaciones <textarea name="notes" placeholder="Presentacion, contenido pendiente, proveedor alterno">${escapeHtml(product.notes || "")}</textarea></label>
       </div>
 
       <div class="panel compact" id="package-fields">
@@ -1317,6 +1503,11 @@ function productModal(productId) {
         <h3>Producto que se vende por peso</h3>
         <p class="hint">Para productos por peso puedes recibir kilos, gramos o miligramos en la entrada de stock. El sistema hara la conversion automaticamente.</p>
       </div>
+
+      ${productId && product.priceHistory?.length ? `<div class="panel compact">
+        <h3>Historial de costo y precio</h3>
+        <div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Costo anterior</th><th>Costo nuevo</th><th>Precio anterior</th><th>Precio nuevo</th></tr></thead><tbody>${product.priceHistory.slice(0, 5).map(item => `<tr><td>${item.date} ${item.time}</td><td>${money.format(item.beforeCost)}</td><td>${money.format(item.afterCost)}</td><td>${money.format(item.beforePrice)}</td><td>${money.format(item.afterPrice)}</td></tr>`).join("")}</tbody></table></div>
+      </div>` : ""}
 
       <div class="actions"><button class="primary">Guardar</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
     </form>
@@ -1342,12 +1533,17 @@ function productModal(productId) {
     const duplicate = state.products.find(p => [p.code, ...(p.aliasCodes || [])].includes(data.code) && p.id !== productId);
     if (duplicate) return toast("Ya existe un producto con ese codigo");
     const stockUnit = data.productMode === "peso" ? data.weightUnit : data.stockUnit;
+    if (productId && product.units > 0 && stockUnit !== product.stockUnit) {
+      return toast("Para cambiar la unidad de medida, primero deja la existencia en cero");
+    }
     const packageUnits = data.productMode === "paquete" ? Number(data.packageUnits || 0) : 0;
     const packagePrice = data.productMode === "paquete" ? Number(data.packagePrice || 0) : 0;
     const wholesaleMin = data.productMode === "paquete" ? Number(data.wholesaleMin || 0) : 0;
     const wholesalePrice = data.productMode === "paquete" ? Number(data.wholesalePrice || 0) : 0;
     if (productId) {
       const before = product.units;
+      const beforeCost = product.cost;
+      const beforePrice = product.price;
       Object.assign(product, {
         name: data.name,
         code: data.code,
@@ -1358,11 +1554,15 @@ function productModal(productId) {
         cost: Number(data.cost),
         price: Number(data.price),
         minStock: Number(data.minStock),
+        supplier: data.supplier || "",
+        location: data.location || "",
+        notes: data.notes || "",
         packageUnits,
         packagePrice,
         wholesaleMin,
         wholesalePrice
       });
+      recordProductPriceChange(product, beforeCost, beforePrice, "Edicion manual");
       if (before !== product.units) addMovement(product, "Ajuste por edicion", before, product.units - before, product.units, product.id);
       logOperation("editar_producto", "products", product.id, `Edito ${product.name}`);
     } else {
@@ -1377,6 +1577,9 @@ function productModal(productId) {
         cost: Number(data.cost),
         price: Number(data.price),
         minStock: Number(data.minStock),
+        supplier: data.supplier || "",
+        location: data.location || "",
+        notes: data.notes || "",
         packageUnits,
         packagePrice,
         wholesaleMin,
@@ -1396,9 +1599,10 @@ function productModal(productId) {
 
 function stockModal(productId) {
   const product = state.products.find(item => item.id === productId);
-  const isWeight = product.stockUnit === "gramo" || product.stockUnit === "miligramo";
+  const isWeight = isWeightProduct(product);
+  const baseWeightLabel = ({ kilogramo: "Kilogramos", gramo: "Gramos", miligramo: "Miligramos" })[product.stockUnit];
   const receiptOptions = isWeight
-    ? `<option value="base">${product.stockUnit === "miligramo" ? "Miligramos" : "Gramos"}</option><option value="kg">Kilos</option><option value="g">Gramos</option><option value="mg">Miligramos</option>`
+    ? `<option value="base">${baseWeightLabel}</option><option value="kg">Kilos</option><option value="g">Gramos</option><option value="mg">Miligramos</option>`
     : `<option value="base">${product.stockUnit === "paquete" ? "Paquetes" : "Unidades sueltas"}</option><option value="box">Cajas</option><option value="largePackage">Paquetes recibidos</option>`;
   showModal(`
     <h2>Agregar o quitar producto</h2>
@@ -1462,7 +1666,10 @@ function stockModal(productId) {
     const before = product.units;
     product.units += change;
     if (change > 0) {
+      const beforeCost = product.cost;
+      const beforePrice = product.price;
       product.cost = unitCost;
+      recordProductPriceChange(product, beforeCost, beforePrice, "Entrada de inventario");
       addLot(product, change, unitCost, `${data.receiptType}/${data.costMode}`);
     }
     addMovement(product, data.type, before, change, product.units, product.id);
@@ -1496,10 +1703,31 @@ function categoryModal() {
 
 function deleteProduct(productId) {
   const product = state.products.find(item => item.id === productId);
-  product.active = !product.active;
-  logOperation("estado_producto", "products", product.id, `${product.active ? "Activo" : "Desactivo"} ${product.name}`);
-  saveState();
-  render();
+  if (!product.active) {
+    product.active = true;
+    logOperation("restaurar_producto", "products", product.id, `Restauro ${product.name}`);
+    saveState();
+    render();
+    toast("Producto restaurado");
+    return;
+  }
+  showModal(`
+    <h2>Eliminar producto</h2>
+    <p>Se quitara <strong>${escapeHtml(product.name)}</strong> del inventario y del punto de venta.</p>
+    <p class="muted">Su historial se conservara para no alterar ventas, costos ni reportes anteriores.</p>
+    <div class="actions">
+      <button class="danger" id="confirm-delete-product">Eliminar</button>
+      <button class="ghost" data-close-modal>Cancelar</button>
+    </div>
+  `);
+  document.querySelector("#confirm-delete-product").addEventListener("click", () => {
+    product.active = false;
+    logOperation("eliminar_producto", "products", product.id, `Elimino ${product.name} del catalogo`);
+    saveState();
+    closeModal();
+    render();
+    toast("Producto eliminado del catalogo");
+  });
 }
 
 function renderExpenses(root) {
@@ -1619,13 +1847,15 @@ function saleDetailModal(saleId) {
 }
 
 function authorizeModal(title, onSuccess) {
+  const credentialFields = secureCloudAuth ? "" : `
+      <label>Usuario <input name="username" placeholder="Supervisor/admin"></label>
+      <label>Contrasena <input name="password" type="password" placeholder="Contrasena"></label>`;
   showModal(`
     <h2>${title}</h2>
-    <p class="muted">Ingresa usuario y contrasena de supervisor/admin, la clave fija autorizada o un token temporal vigente.</p>
+    <p class="muted">${secureCloudAuth ? "Ingresa la clave fija autorizada o un token temporal vigente." : "Ingresa usuario y contrasena de supervisor/admin, la clave fija autorizada o un token temporal vigente."}</p>
     <form id="auth-form" class="stack">
-      <label>Usuario <input name="username" placeholder="Supervisor/admin"></label>
-      <label>Contraseña <input name="password" type="password" placeholder="Contraseña"></label>
-      <label>Clave fija o token temporal <input name="authCode" inputmode="numeric" placeholder="Opcional si se usa usuario y contrasena"></label>
+      ${credentialFields}
+      <label>Clave fija o token temporal <input name="authCode" inputmode="numeric" placeholder="Clave o token"></label>
       <div class="actions"><button class="primary">Autorizar</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
     </form>
   `);
@@ -1637,12 +1867,12 @@ function authorizeModal(title, onSuccess) {
       onSuccess(byCode);
       return;
     }
+    if (secureCloudAuth) return toast("Autorizacion invalida: usa token o clave fija vigente");
     const authUser = state.users.find(user => user.username === data.username && user.password === data.password && user.active && (isMaster(user) || ["admin", "supervisor"].includes(user.role)) && canAccess("authorizations", user));
     if (!authUser) return toast("Autorizacion invalida");
     onSuccess(authUser);
   });
 }
-
 function cancelSale(saleId, authUser) {
   const sale = state.sales.find(item => item.id === saleId);
   if (sale.status === "cancelada") return toast("La venta ya esta cancelada");
@@ -1975,44 +2205,6 @@ function toggleAnnouncement(id) {
   render();
 }
 
-function legacyUserModal(userId) {
-  const user = state.users.find(item => item.id === userId) || {};
-  showModal(`
-    <h2>${userId ? "Editar usuario" : "Nuevo usuario"}</h2>
-    <form id="user-form" class="grid cols-2">
-      <label>Nombre <input name="name" required value="${user.name || ""}"></label>
-      <label>Usuario <input name="username" required value="${user.username || ""}"></label>
-      <label>Contraseña <input name="password" required value="${user.password || ""}"></label>
-      <label>Rol <select name="role"><option value="vendedor" ${user.role === "vendedor" ? "selected" : ""}>Vendedor</option><option value="supervisor" ${user.role === "supervisor" ? "selected" : ""}>Supervisor</option><option value="admin" ${user.role === "admin" ? "selected" : ""}>Administrador</option></select></label>
-      <div class="actions"><button class="primary">Guardar</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
-    </form>
-  `);
-  document.querySelector("#user-form").addEventListener("submit", event => {
-    event.preventDefault();
-    const data = Object.fromEntries(new FormData(event.target));
-    if (state.users.some(u => u.username === data.username && u.id !== userId)) return toast("Ese usuario ya existe");
-    if (userId) {
-      Object.assign(user, data);
-      logOperation("editar_usuario", "users", user.id, `Edito usuario ${user.name}`);
-    } else {
-      const created = { id: uid("usr"), ...data, active: true };
-      state.users.push(created);
-      logOperation("alta_usuario", "users", created.id, `Creo usuario ${created.name}`);
-    }
-    saveState();
-    closeModal();
-    render();
-  });
-}
-
-function legacyToggleUser(userId) {
-  const user = state.users.find(item => item.id === userId);
-  user.active = !user.active;
-  logOperation("estado_usuario", "users", user.id, `${user.active ? "Activo" : "Desactivo"} usuario ${user.name}`);
-  saveState();
-  render();
-}
-
 function renderUsers(root) {
   const canCreate = isMaster() || currentUser().role === "admin";
   root.innerHTML = `
@@ -2028,13 +2220,14 @@ function renderUsers(root) {
 }
 
 function userTable() {
-  return `<div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Usuario</th><th>Tipo de usuario</th><th>Accesos</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${state.users.map(user => {
+  return `<div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Usuario</th>${secureCloudAuth ? "<th>Correo Auth</th>" : ""}<th>Tipo de usuario</th><th>Accesos</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>${state.users.map(user => {
     const accessCount = VIEW_ACCESS.filter(item => canAccess(item.id, user)).length;
     const editable = canEditUser(user);
     const canToggle = editable && user.id !== session.userId && !isMaster(user);
     return `<tr>
       <td>${escapeHtml(user.name)}</td>
       <td>${escapeHtml(user.username)}</td>
+      ${secureCloudAuth ? `<td>${escapeHtml(user.authEmail || authEmailForUsername(user.username))}</td>` : ""}
       <td>${roleLabel(user.role)}</td>
       <td>${isMaster(user) ? "Todos" : `${accessCount} de ${VIEW_ACCESS.length}`}</td>
       <td><span class="badge ${user.active ? "ok" : "danger"}">${user.active ? "Activo" : "Inactivo"}</span></td>
@@ -2054,6 +2247,9 @@ function userModal(userId) {
   const actorIsMaster = isMaster();
   const targetIsMaster = isMaster(user);
   const selectedAccess = { ...defaultAccessForRole(user.role), ...(user.access || {}) };
+  const authFields = secureCloudAuth
+    ? `<label>Correo de acceso Supabase <input name="authEmail" type="email" required value="${escapeHtml(user.authEmail || authEmailForUsername(user.username || ""))}"></label>`
+    : `<label>Contrasena <input name="password" required value="${escapeHtml(user.password || "")}"></label>`;
   const roleOptions = targetIsMaster
     ? `<option value="master" selected>Dueno/Master</option>`
     : `${actorIsMaster ? `<option value="admin" ${user.role === "admin" ? "selected" : ""}>Administrador</option>` : ""}<option value="supervisor" ${user.role === "supervisor" ? "selected" : ""}>Supervisor</option><option value="vendedor" ${user.role === "vendedor" ? "selected" : ""}>Vendedor</option>`;
@@ -2063,7 +2259,7 @@ function userModal(userId) {
       <div class="grid cols-2">
         <label>Nombre <input name="name" required value="${escapeHtml(user.name || "")}"></label>
         <label>Usuario <input name="username" required value="${escapeHtml(user.username || "")}"></label>
-        <label>Contrasena <input name="password" required value="${escapeHtml(user.password || "")}"></label>
+        ${authFields}
         <label>Tipo de usuario <select name="role" ${targetIsMaster ? "disabled" : ""}>${roleOptions}</select></label>
       </div>
       <div class="panel compact">
@@ -2071,7 +2267,7 @@ function userModal(userId) {
         <div class="grid cols-2" id="user-access-list">
           ${VIEW_ACCESS.map(item => `<label><input type="checkbox" name="access" value="${item.id}" ${selectedAccess[item.id] ? "checked" : ""} ${targetIsMaster ? "disabled" : ""}> ${item.label}</label>`).join("")}
         </div>
-        <p class="hint">Autorizaciones permite generar tokens y autorizar operaciones con usuario y contrasena.</p>
+        <p class="hint">${secureCloudAuth ? "Crea tambien este correo en Supabase Authentication. La contrasena se administra en Supabase, no en este sistema." : "Autorizaciones permite generar tokens y autorizar operaciones con usuario y contrasena."}</p>
       </div>
       <div class="actions"><button class="primary">Guardar</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
     </form>
@@ -2096,10 +2292,14 @@ function userModal(userId) {
       : Object.fromEntries(VIEW_ACCESS.map(item => [item.id, selected.includes(item.id)]));
     if (role !== "admin") access.users = false;
     if (userId) {
-      Object.assign(user, { name: data.name, username: data.username, password: data.password, role, access });
+      const update = { name: data.name, username: data.username, authEmail: data.authEmail || authEmailForUsername(data.username), role, access };
+      if (!secureCloudAuth) update.password = data.password;
+      Object.assign(user, update);
       logOperation("editar_usuario", "users", user.id, `Edito usuario ${user.name}`);
     } else {
-      const created = normalizeUser({ id: uid("usr"), name: data.name, username: data.username, password: data.password, role, access, active: true });
+      const createdData = { id: uid("usr"), name: data.name, username: data.username, authEmail: data.authEmail || authEmailForUsername(data.username), role, access, active: true };
+      if (!secureCloudAuth) createdData.password = data.password;
+      const created = normalizeUser(createdData);
       state.users.push(created);
       logOperation("alta_usuario", "users", created.id, `Creo usuario ${created.name}`);
     }
@@ -2138,19 +2338,78 @@ function renderBackup(root) {
   document.querySelector("#restore-backup").addEventListener("click", restoreBackup);
 }
 
-function makeBackup() {
-  const backup = { id: uid("bak"), date: today(), time: nowTime(), userId: session.userId, data: state };
-  state.backups.unshift({ id: backup.id, date: backup.date, time: backup.time, userId: backup.userId, filename: `respaldo-tienda-${backup.date}.json` });
+async function makeBackup() {
+  const backup = createBackupRecord("manual");
+  state.backups.unshift(backupMetadata(backup));
   logOperation("respaldo", "backups", backup.id, "Genero respaldo de informacion");
   saveState();
+  await saveBackupToCloud(backup);
+  downloadBackup(backup);
+  render();
+}
+
+function createBackupRecord(kind = "manual") {
+  const date = today();
+  const time = nowTime();
+  return {
+    id: uid("bak"),
+    kind,
+    businessId: cloudBusinessId,
+    date,
+    time,
+    userId: session?.userId || "sistema",
+    filename: `respaldo-tienda-${date}-${kind}.json`,
+    data: backupStateSnapshot()
+  };
+}
+
+function backupMetadata(backup) {
+  return { id: backup.id, kind: backup.kind, date: backup.date, time: backup.time, userId: backup.userId, filename: backup.filename };
+}
+
+function downloadBackup(backup) {
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `respaldo-tienda-${backup.date}.json`;
+  link.download = backup.filename;
   link.click();
   URL.revokeObjectURL(url);
-  render();
+}
+
+async function saveBackupToCloud(backup) {
+  const client = getCloudClient();
+  if (!client) return;
+  try {
+    await client.from("pos_backups").insert({
+      id: backup.id,
+      business_id: cloudBusinessId,
+      backup_type: backup.kind,
+      created_by: backup.userId,
+      filename: backup.filename,
+      state: backup.data
+    });
+  } catch (error) {
+    console.warn("No se pudo guardar respaldo en nube:", error.message);
+  }
+}
+
+async function maybeAutoBackup() {
+  if (autoBackupBusy || !session || !cloudMode) return;
+  const key = `lastAutoBackup:${cloudBusinessId}`;
+  if (localStorage.getItem(key) === today()) return;
+  autoBackupBusy = true;
+  try {
+    const backup = createBackupRecord("automatico");
+    state.backups.unshift(backupMetadata(backup));
+    state.backups = state.backups.slice(0, 30);
+    logOperation("respaldo_auto", "backups", backup.id, "Genero respaldo automatico diario", backup.userId);
+    localStorage.setItem(key, today());
+    saveState();
+    await saveBackupToCloud(backup);
+  } finally {
+    autoBackupBusy = false;
+  }
 }
 
 function restoreBackup() {
