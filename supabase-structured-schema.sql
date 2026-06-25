@@ -23,6 +23,8 @@ create table if not exists public.product_categories (
   id text primary key,
   business_id text not null references public.businesses(id),
   name text not null,
+  wholesale_min numeric(14,3) not null default 0,
+  wholesale_price numeric(14,2) not null default 0,
   active boolean not null default true,
   unique (business_id, name)
 );
@@ -43,6 +45,7 @@ create table if not exists public.products (
   package_price numeric(14,2) not null default 0,
   wholesale_min numeric(14,3) not null default 0,
   wholesale_price numeric(14,2) not null default 0,
+  sale_presentations jsonb not null default '[]'::jsonb,
   supplier text,
   location text,
   notes text,

@@ -140,7 +140,7 @@ function normalizeState(data) {
   data.settings = { ...fresh.settings, ...(data.settings || {}) };
   data.announcements = data.announcements || fresh.announcements;
   data.users = data.users || fresh.users;
-  data.categories = data.categories || fresh.categories;
+  data.categories = (data.categories || fresh.categories).map(normalizeCategory);
   data.products = data.products || fresh.products;
   data.cashRegisters = data.cashRegisters || [];
   data.sales = data.sales || [];
@@ -176,6 +176,15 @@ function ensureMasterUser(users) {
   return users;
 }
 
+function normalizeCategory(category) {
+  if (typeof category === "string") category = { id: uid("cat"), name: category };
+  category.id = category.id || uid("cat");
+  category.name = category.name || "Sin tipo";
+  category.wholesaleMin = Number(category.wholesaleMin || 0);
+  category.wholesalePrice = Number(category.wholesalePrice || 0);
+  return category;
+}
+
 function normalizeProduct(product) {
   product.stockUnit = product.stockUnit || "pieza";
   product.aliasCodes = product.aliasCodes || [];
@@ -187,10 +196,46 @@ function normalizeProduct(product) {
   product.packagePrice = Number(product.packagePrice || 0);
   product.wholesaleMin = Number(product.wholesaleMin || 0);
   product.wholesalePrice = Number(product.wholesalePrice || 0);
+  product.salePresentations = normalizeSalePresentations(product);
   product.lots = Array.isArray(product.lots) && product.lots.length
     ? product.lots
     : [{ id: uid("lot"), qty: Number(product.units || 0), cost: Number(product.cost || 0), date: today(), reference: "Inventario inicial" }];
   return product;
+}
+
+function normalizeSalePresentations(product) {
+  const current = Array.isArray(product.salePresentations) ? product.salePresentations : [];
+  const presentations = current
+    .filter(item => item && item.name && Number(item.quantity || 0) > 0 && Number(item.price || 0) > 0)
+    .map(item => ({
+      id: item.id || uid("pres"),
+      name: String(item.name).trim(),
+      quantity: Number(item.quantity || 1),
+      price: Number(item.price || 0),
+      minQty: Number(item.minQty || 1),
+      active: item.active !== false
+    }));
+  if (product.packageUnits > 1 && product.packagePrice > 0 && !presentations.some(item => item.id === "legacy-package")) {
+    presentations.push({
+      id: "legacy-package",
+      name: `Paquete/caja de ${product.packageUnits}`,
+      quantity: Number(product.packageUnits),
+      price: Number(product.packagePrice),
+      minQty: 1,
+      active: true
+    });
+  }
+  if (product.wholesaleMin > 1 && product.wholesalePrice > 0 && !presentations.some(item => item.id === "legacy-wholesale")) {
+    presentations.push({
+      id: "legacy-wholesale",
+      name: `Mayoreo desde ${product.wholesaleMin}`,
+      quantity: 1,
+      price: Number(product.wholesalePrice),
+      minQty: Number(product.wholesaleMin),
+      active: true
+    });
+  }
+  return presentations;
 }
 
 function saveState() {
@@ -506,15 +551,99 @@ function weightSaleStep(product) {
 
 function saleOptions(product) {
   const options = [
-    { id: "base", name: product.stockUnit === "pieza" ? "Por pieza" : `Por ${product.stockUnit}`, quantity: 1, price: Number(product.price || 0) }
+    { id: "base", name: product.stockUnit === "pieza" ? "Por pieza" : `Por ${product.stockUnit}`, quantity: 1, price: Number(product.price || 0), minQty: 1 }
   ];
-  if (product.packageUnits > 1 && product.packagePrice > 0) {
-    options.push({ id: "package", name: `Paquete/caja de ${product.packageUnits}`, quantity: Number(product.packageUnits), price: Number(product.packagePrice) });
-  }
-  if (product.wholesaleMin > 1 && product.wholesalePrice > 0) {
-    options.push({ id: "wholesale", name: `Precio especial desde ${product.wholesaleMin}`, quantity: 1, price: Number(product.wholesalePrice), minQty: Number(product.wholesaleMin) });
-  }
+  (product.salePresentations || [])
+    .filter(item => item.active !== false && Number(item.quantity || 0) > 0 && Number(item.price || 0) > 0)
+    .forEach(item => options.push({
+      id: item.id,
+      name: item.name,
+      quantity: Number(item.quantity || 1),
+      price: Number(item.price || 0),
+      minQty: Number(item.minQty || 1)
+    }));
   return options;
+}
+
+function categoryWholesaleRule(categoryId) {
+  const category = state.categories.find(item => item.id === categoryId);
+  if (!category || Number(category.wholesaleMin || 0) <= 1 || Number(category.wholesalePrice || 0) <= 0) return null;
+  return {
+    minQty: Number(category.wholesaleMin),
+    price: Number(category.wholesalePrice),
+    name: category.name
+  };
+}
+
+function categoryWholesaleEligible(account, line) {
+  const product = state.products.find(item => item.id === line.productId);
+  if (!product) return false;
+  const option = getSaleOption(product, line.optionId);
+  const rule = categoryWholesaleRule(product.categoryId);
+  if (!rule) return false;
+  if ((line.optionId || "base") !== "base") return false;
+  return Number(option.quantity || 1) === 1;
+}
+
+function cartCategoryWholesaleQty(account, categoryId) {
+  return account.items.reduce((sum, line) => {
+    const product = state.products.find(item => item.id === line.productId);
+    if (!product || product.categoryId !== categoryId) return sum;
+    if (!categoryWholesaleEligible(account, line)) return sum;
+    return sum + Number(line.qty || 0);
+  }, 0);
+}
+
+function cartLinePricing(account, line) {
+  const product = state.products.find(item => item.id === line.productId);
+  const basePrice = Number(line.unitPrice || product?.price || 0);
+  if (!product || !categoryWholesaleEligible(account, line)) {
+    return { unitPrice: basePrice, wholesaleApplied: false };
+  }
+  const rule = categoryWholesaleRule(product.categoryId);
+  const categoryQty = cartCategoryWholesaleQty(account, product.categoryId);
+  if (rule && categoryQty >= rule.minQty) {
+    return {
+      unitPrice: rule.price,
+      wholesaleApplied: true,
+      wholesaleMin: rule.minQty,
+      wholesaleType: rule.name
+    };
+  }
+  return { unitPrice: basePrice, wholesaleApplied: false, wholesaleMin: rule?.minQty, wholesaleType: rule?.name };
+}
+
+function presentationsToText(presentations = []) {
+  return presentations
+    .filter(item => item.active !== false)
+    .map(item => `${item.name} | ${item.quantity} | ${item.price}${Number(item.minQty || 1) > 1 ? ` | ${item.minQty}` : ""}`)
+    .join("\n");
+}
+
+function parseSalePresentations(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const parts = line.split("|").map(part => part.trim());
+      const [name, quantity, price, minQty] = parts;
+      return {
+        id: uid("pres"),
+        name,
+        quantity: Number(quantity || 0),
+        price: Number(String(price || "0").replace("$", "")),
+        minQty: Number(minQty || 1),
+        active: true
+      };
+    })
+    .filter(item => item.name && item.quantity > 0 && item.price > 0);
+}
+
+function defaultContainerUnits(product) {
+  if (Number(product.packageUnits || 0) > 0) return Number(product.packageUnits);
+  const presentation = (product.salePresentations || []).find(item => item.active !== false && Number(item.quantity || 0) > 1);
+  return Number(presentation?.quantity || 1);
 }
 
 function getSaleOption(product, optionId = "base") {
@@ -1104,11 +1233,12 @@ function addToCart(productId, optionId = "base") {
   const account = currentAccount();
   const line = account.items.find(item => item.productId === productId && item.optionId === option.id);
   const currentQty = line?.qty || 0;
+  const minimum = Math.max(1, Number(option.minQty || 1));
   const availableSaleQty = product.units / option.quantity;
-  const increment = Math.min(1, Math.max(0, availableSaleQty - currentQty));
-  if (increment <= 0) return toast("No alcanza la cantidad disponible");
+  const increment = line ? 1 : minimum;
+  if ((currentQty + increment) * option.quantity > product.units) return toast("No alcanza la cantidad disponible");
   if (line) line.qty += increment;
-  else account.items.push({ productId, optionId: option.id, optionName: option.name, unitQuantity: option.quantity, unitPrice: option.price, qty: increment });
+  else account.items.push({ productId, optionId: option.id, optionName: option.name, unitQuantity: option.quantity, unitPrice: option.price, minQty: minimum, qty: increment });
   saveSession();
   render();
 }
@@ -1121,7 +1251,7 @@ function saleOptionModal(product) {
       ${saleOptions(product).map(option => `<button class="product-button" data-sale-option="${option.id}">
         <strong>${escapeHtml(option.name)}</strong>
         <small>Sale del inventario: ${unitLabel(product, option.quantity)}</small>
-        <small>${money.format(option.price)}</small>
+        <small>${money.format(option.price)}${option.minQty > 1 ? ` desde ${option.minQty}` : ""}</small>
       </button>`).join("")}
     </div>
     <button class="ghost" data-close-modal>Cerrar</button>
@@ -1136,14 +1266,17 @@ function cartHtml(account) {
   if (!account.items.length) return `<p class="empty">Agrega productos a la cuenta.</p>`;
   return account.items.map(item => {
     const product = state.products.find(p => p.id === item.productId);
+    const option = getSaleOption(product, item.optionId);
+    const pricing = cartLinePricing(account, item);
     const step = isWeightProduct(product) ? weightSaleStep(product) : 1;
+    const minimum = Math.max(step, Number(item.minQty || option.minQty || 1));
     const max = isWeightProduct(product)
       ? product.units / (item.unitQuantity || 1)
       : Math.floor(product.units / (item.unitQuantity || 1));
     return `<div class="cart-line">
-      <div><strong>${product.name}</strong><br><small class="muted">${item.optionName || "Por pieza"} | sale del inventario: ${unitLabel(product, cartStockNeeded(item))}</small></div>
-      <input data-cart-qty="${product.id}|${item.optionId || "base"}" type="number" min="${step}" step="${step}" max="${max}" value="${item.qty}">
-      <strong>${money.format((item.unitPrice || product.price) * item.qty)}</strong>
+      <div><strong>${product.name}</strong><br><small class="muted">${item.optionName || "Por pieza"} | sale del inventario: ${unitLabel(product, cartStockNeeded(item))}${pricing.wholesaleApplied ? ` | mayoreo ${escapeHtml(pricing.wholesaleType)} desde ${pricing.wholesaleMin}` : ""}</small></div>
+      <input data-cart-qty="${product.id}|${item.optionId || "base"}" type="number" min="${minimum}" step="${step}" max="${max}" value="${item.qty}">
+      <strong>${money.format(pricing.unitPrice * item.qty)}</strong>
       <button class="tiny danger" data-remove-cart="${product.id}|${item.optionId || "base"}">X</button>
     </div>`;
   }).join("");
@@ -1155,7 +1288,9 @@ function bindCartEvents() {
       const [productId, optionId] = input.dataset.cartQty.split("|");
       const product = state.products.find(p => p.id === productId);
       const line = currentAccount().items.find(item => item.productId === product.id && (item.optionId || "base") === optionId);
-      const minimum = isWeightProduct(product) ? weightSaleStep(product) : 1;
+      const option = getSaleOption(product, line.optionId);
+      const step = isWeightProduct(product) ? weightSaleStep(product) : 1;
+      const minimum = Math.max(step, Number(line.minQty || option.minQty || 1));
       const maximum = isWeightProduct(product)
         ? product.units / (line.unitQuantity || 1)
         : Math.floor(product.units / (line.unitQuantity || 1));
@@ -1177,8 +1312,8 @@ function bindCartEvents() {
 
 function cartTotal(account) {
   return account.items.reduce((sum, item) => {
-    const product = state.products.find(p => p.id === item.productId);
-    return sum + (item.unitPrice || product.price) * item.qty;
+    const pricing = cartLinePricing(account, item);
+    return sum + pricing.unitPrice * item.qty;
   }, 0);
 }
 
@@ -1286,7 +1421,8 @@ function completeSale(paid, paymentMethod = "efectivo", ticketFolio = "", option
   const items = account.items.map(line => {
     const product = state.products.find(p => p.id === line.productId);
     const stockQty = cartStockNeeded(line);
-    const unitPrice = line.unitPrice || product.price;
+    const pricing = cartLinePricing(account, line);
+    const unitPrice = pricing.unitPrice;
     const consumption = consumeLotsDetailed(product, stockQty);
     const totalCost = consumption.totalCost;
     const subtotal = unitPrice * line.qty;
@@ -1304,6 +1440,10 @@ function completeSale(paid, paymentMethod = "efectivo", ticketFolio = "", option
       price: unitPrice,
       subtotal,
       profit: subtotal - totalCost,
+      categoryWholesale: pricing.wholesaleApplied ? {
+        type: pricing.wholesaleType,
+        minQty: pricing.wholesaleMin
+      } : null,
       returnedQty: 0
     };
   });
@@ -1397,6 +1537,7 @@ function renderInventory(root) {
         <label>Buscar producto <input id="inventory-search" placeholder="Nombre, codigo o tipo"></label>
         <button class="primary compact" id="new-product">Agregar producto</button>
         ${can("admin", "supervisor") ? `<button class="ghost compact" id="new-category">Nuevo tipo</button>` : ""}
+        ${can("admin", "supervisor") ? `<button class="ghost compact" id="category-settings">Tipos y mayoreo</button>` : ""}
         ${can("admin", "supervisor") ? `<label><input id="show-inactive-products" type="checkbox"> Mostrar eliminados</label>` : ""}
       </div>
       <div id="inventory-table"></div>
@@ -1411,6 +1552,7 @@ function renderInventory(root) {
   document.querySelector("#show-inactive-products")?.addEventListener("change", drawInventoryTable);
   document.querySelector("#new-product").addEventListener("click", () => productModal());
   document.querySelector("#new-category")?.addEventListener("click", categoryModal);
+  document.querySelector("#category-settings")?.addEventListener("click", categorySettingsModal);
   drawInventoryTable();
 }
 
@@ -1454,7 +1596,8 @@ function productStockTable(products) {
 function productModal(productId) {
   if (!can("admin", "supervisor") && productId) return toast("Solo administracion puede editar productos");
   const product = normalizeProduct(state.products.find(item => item.id === productId) || {});
-  const mode = isWeightProduct(product) ? "peso" : product.packageUnits > 1 || product.packagePrice > 0 || product.wholesaleMin > 0 ? "paquete" : "unidad";
+  const mode = isWeightProduct(product) ? "peso" : product.stockUnit === "paquete" ? "paquete" : "unidad";
+  const presentationText = presentationsToText(product.salePresentations || []);
   showModal(`
     <h2>${productId ? "Editar producto" : "Agregar producto"}</h2>
     <form id="product-form" class="stack">
@@ -1501,14 +1644,11 @@ function productModal(productId) {
       </div>
 
       <div class="panel compact" id="package-fields">
-        <h3>Cajas, paquetes y precio especial</h3>
-        <div class="grid cols-2">
-          <label>Piezas que trae cada caja/paquete <input name="packageUnits" type="number" min="0" step="0.001" value="${product.packageUnits || 0}"></label>
-          <label>Precio al vender caja/paquete <input name="packagePrice" type="number" min="0" step="0.01" value="${product.packagePrice || 0}"></label>
-          <label>Precio especial desde cuantas piezas <input name="wholesaleMin" type="number" min="0" step="0.001" value="${product.wholesaleMin || 0}"></label>
-          <label>Precio especial por pieza <input name="wholesalePrice" type="number" min="0" step="0.01" value="${product.wholesalePrice || 0}"></label>
-        </div>
-        <p class="hint">Ejemplo: si una caja trae 24 piezas, escribe 24. Al vender una caja, el sistema descuenta esas 24 piezas.</p>
+        <h3>Presentaciones de venta opcionales</h3>
+        <label class="wide">Una presentacion por linea
+          <textarea name="salePresentations" placeholder="Paquete de 12 | 12 | 100&#10;Caja de 10 paquetes | 120 | 900&#10;100 g | 100 | 45">${escapeHtml(presentationText)}</textarea>
+        </label>
+        <p class="hint">Formato: Nombre | cantidad que descuenta del inventario | precio de venta | minimo opcional. Aplica para piezas, paquetes, cajas, kilos, gramos o miligramos. Para mayoreo general usa Tipos y mayoreo.</p>
       </div>
 
       <div class="panel compact" id="weight-help">
@@ -1527,7 +1667,7 @@ function productModal(productId) {
   const form = document.querySelector("#product-form");
   const syncProductMode = () => {
     const selected = form.productMode.value;
-    document.querySelector("#package-fields").style.display = selected === "paquete" ? "block" : "none";
+    document.querySelector("#package-fields").style.display = "block";
     document.querySelector("#weight-help").style.display = selected === "peso" ? "block" : "none";
     document.querySelector("#stock-unit-label").style.display = selected === "peso" ? "none" : "grid";
     document.querySelector("#weight-unit-label").style.display = selected === "peso" ? "grid" : "none";
@@ -1548,10 +1688,7 @@ function productModal(productId) {
     if (productId && product.units > 0 && stockUnit !== product.stockUnit) {
       return toast("Para cambiar la unidad de medida, primero deja la existencia en cero");
     }
-    const packageUnits = data.productMode === "paquete" ? Number(data.packageUnits || 0) : 0;
-    const packagePrice = data.productMode === "paquete" ? Number(data.packagePrice || 0) : 0;
-    const wholesaleMin = data.productMode === "paquete" ? Number(data.wholesaleMin || 0) : 0;
-    const wholesalePrice = data.productMode === "paquete" ? Number(data.wholesalePrice || 0) : 0;
+    const salePresentations = parseSalePresentations(data.salePresentations || "");
     if (productId) {
       const before = product.units;
       const beforeCost = product.cost;
@@ -1569,10 +1706,11 @@ function productModal(productId) {
         supplier: data.supplier || "",
         location: data.location || "",
         notes: data.notes || "",
-        packageUnits,
-        packagePrice,
-        wholesaleMin,
-        wholesalePrice
+        salePresentations,
+        packageUnits: 0,
+        packagePrice: 0,
+        wholesaleMin: 0,
+        wholesalePrice: 0
       });
       recordProductPriceChange(product, beforeCost, beforePrice, "Edicion manual");
       if (before !== product.units) addMovement(product, "Ajuste por edicion", before, product.units - before, product.units, product.id);
@@ -1592,10 +1730,11 @@ function productModal(productId) {
         supplier: data.supplier || "",
         location: data.location || "",
         notes: data.notes || "",
-        packageUnits,
-        packagePrice,
-        wholesaleMin,
-        wholesalePrice,
+        salePresentations,
+        packageUnits: 0,
+        packagePrice: 0,
+        wholesaleMin: 0,
+        wholesalePrice: 0,
         active: true
       };
       normalizeProduct(created);
@@ -1627,7 +1766,7 @@ function stockModal(productId) {
         <select name="receiptType" id="receipt-type">${receiptOptions}</select>
       </label>
       <label>Cantidad <input name="qty" type="number" min="0.001" step="0.001" required></label>
-      <label id="container-label">Cuantas piezas trae cada caja/paquete <input name="unitsPerContainer" type="number" min="0.001" step="0.001" value="${product.packageUnits || 1}"></label>
+      <label id="container-label">Cuantas unidades base trae cada caja/paquete <input name="unitsPerContainer" type="number" min="0.001" step="0.001" value="${defaultContainerUnits(product)}"></label>
       <label id="cost-mode-label">El costo corresponde a
         <select name="costMode">
           <option value="base">Cada pieza/unidad del inventario</option>
@@ -1692,21 +1831,63 @@ function stockModal(productId) {
   });
 }
 
-function categoryModal() {
+function categorySettingsModal() {
   showModal(`
-    <h2>Nuevo tipo de producto</h2>
+    <h2>Tipos y mayoreo</h2>
+    <p class="hint">El mayoreo por tipo aplica cuando la cuenta suma la cantidad minima entre productos del mismo tipo vendidos por unidad base.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Tipo</th><th>Minimo mayoreo</th><th>Precio mayoreo</th><th>Acciones</th></tr></thead>
+      <tbody>${state.categories.map(category => `<tr>
+        <td>${escapeHtml(category.name)}</td>
+        <td>${category.wholesaleMin || "-"}</td>
+        <td>${category.wholesalePrice ? money.format(category.wholesalePrice) : "-"}</td>
+        <td><button class="tiny" data-edit-category="${category.id}">Editar</button></td>
+      </tr>`).join("")}</tbody>
+    </table></div>
+    <div class="actions"><button class="primary" id="category-settings-new">Nuevo tipo</button><button type="button" class="ghost" data-close-modal>Cerrar</button></div>
+  `);
+  document.querySelector("#category-settings-new").addEventListener("click", () => categoryModal());
+  document.querySelectorAll("[data-edit-category]").forEach(button => {
+    button.addEventListener("click", () => categoryModal(button.dataset.editCategory));
+  });
+}
+
+function categoryModal(categoryId = null) {
+  const category = normalizeCategory(state.categories.find(item => item.id === categoryId) || {});
+  showModal(`
+    <h2>${categoryId ? "Editar tipo de producto" : "Nuevo tipo de producto"}</h2>
     <form id="category-form" class="stack">
-      <label>Nombre <input name="name" required></label>
+      <label>Nombre <input name="name" required value="${escapeHtml(categoryId ? category.name : "")}"></label>
+      <div class="grid cols-2">
+        <label>Mayoreo desde cuantas unidades <input name="wholesaleMin" type="number" min="0" step="0.001" value="${category.wholesaleMin || 0}"></label>
+        <label>Precio por unidad en mayoreo <input name="wholesalePrice" type="number" min="0" step="0.01" value="${category.wholesalePrice || 0}"></label>
+      </div>
+      <p class="hint">Si no quieres mayoreo para este tipo, deja ambos campos en 0. El minimo se suma entre productos del mismo tipo dentro de la misma cuenta.</p>
       <div class="actions"><button class="primary">Guardar</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
     </form>
   `);
   document.querySelector("#category-form").addEventListener("submit", event => {
     event.preventDefault();
-    const name = new FormData(event.target).get("name").trim();
-    if (state.categories.some(category => category.name.toLowerCase() === name.toLowerCase())) return toast("Ese tipo ya existe");
-    const category = { id: uid("cat"), name };
-    state.categories.push(category);
-    logOperation("alta_tipo", "categories", category.id, `Creo tipo ${name}`);
+    const data = Object.fromEntries(new FormData(event.target));
+    const name = data.name.trim();
+    if (state.categories.some(item => item.name.toLowerCase() === name.toLowerCase() && item.id !== categoryId)) return toast("Ese tipo ya existe");
+    if (categoryId) {
+      Object.assign(category, {
+        name,
+        wholesaleMin: Number(data.wholesaleMin || 0),
+        wholesalePrice: Number(data.wholesalePrice || 0)
+      });
+      logOperation("editar_tipo", "categories", category.id, `Edito tipo ${name}`);
+    } else {
+      Object.assign(category, {
+        id: uid("cat"),
+        name,
+        wholesaleMin: Number(data.wholesaleMin || 0),
+        wholesalePrice: Number(data.wholesalePrice || 0)
+      });
+      state.categories.push(category);
+      logOperation("alta_tipo", "categories", category.id, `Creo tipo ${name}`);
+    }
     saveState();
     closeModal();
     render();

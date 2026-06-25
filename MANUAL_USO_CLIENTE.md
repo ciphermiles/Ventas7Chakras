@@ -72,9 +72,46 @@ No se puede cerrar sesion si la caja sigue abierta.
 2. Presiona `Agregar producto`.
 3. Captura nombre, codigo, tipo, costo, precio y stock minimo.
 4. Elige si se maneja por piezas, paquetes/cajas o peso.
-5. Guarda.
+5. Si aplica, captura presentaciones de venta.
+6. Guarda.
 
 Para productos por peso se puede registrar en kilos, gramos o miligramos.
+
+## Tipos y mayoreo
+
+El mayoreo normal se configura por tipo de producto, no por producto individual.
+
+Ejemplo: si el tipo `Veladora de aroma` tiene mayoreo desde 10 unidades con precio de $25, el sistema aplica ese precio cuando la cuenta suma 10 o mas unidades entre productos de ese mismo tipo.
+
+Para configurarlo:
+
+1. Entra a `Productos`.
+2. Presiona `Tipos y mayoreo`.
+3. Edita el tipo de producto.
+4. Captura `Mayoreo desde cuantas unidades` y `Precio por unidad en mayoreo`.
+5. Guarda.
+
+Si no quieres mayoreo para un tipo, deja ambos campos en 0.
+
+## Presentaciones de venta
+
+Las presentaciones son opcionales. Sirven para vender el mismo producto por paquete, caja, kilo, gramos o una presentacion especial sin duplicarlo en inventario.
+
+Formato:
+
+`Nombre | cantidad que descuenta del inventario | precio | minimo opcional`
+
+Ejemplos:
+
+`Paquete de 12 | 12 | 100`
+
+`Caja de 10 paquetes | 120 | 900`
+
+`100 g | 100 | 45`
+
+`1 kg | 1000 | 380`
+
+La cantidad siempre se interpreta en la unidad base del producto. Si el producto se guarda en gramos, `1 kg` debe capturarse como `1000`.
 
 ## Entrada de inventario
 
