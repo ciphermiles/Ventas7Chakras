@@ -81,6 +81,7 @@ td { font-size: 14px; }
   border-radius: 8px;
   padding: 32px;
 }
+.login-logo { width: min(176px, 70%); max-height: 76px; object-fit: contain; object-position: left center; margin-bottom: 14px; }
 .eyebrow { color: var(--accent); text-transform: uppercase; font-size: 12px; font-weight: 700; margin-bottom: 8px; }
 .muted, .hint { color: var(--muted); }
 .hint { font-size: 12px; line-height: 1.4; }
@@ -98,6 +99,7 @@ td { font-size: 14px; }
 .brand-block strong { font-size: 18px; }
 .brand-block span { color: #c8d6ce; font-size: 13px; }
 .brand-row { display: flex; align-items: center; gap: 9px; }
+.brand-logo { width: 38px; height: 38px; border-radius: 8px; object-fit: contain; background: #fff; padding: 2px; flex: 0 0 auto; }
 .logo-mark {
   width: 34px;
   height: 34px;
@@ -134,6 +136,7 @@ td { font-size: 14px; }
   background: rgba(255,255,255,.16);
 }
 .content { padding: 24px; display: grid; gap: 18px; align-content: start; }
+.mobile-bar { display: none; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
 .grid { display: grid; gap: 14px; }
 .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -146,6 +149,9 @@ td { font-size: 14px; }
   box-shadow: 0 8px 20px rgba(23,33,27,.05);
 }
 .panel { padding: 16px; display: grid; gap: 14px; }
+.disclosure > summary { cursor: pointer; color: var(--brand-dark); font-weight: 700; }
+.disclosure[open] > summary { margin-bottom: 12px; }
+.historical-line { display: grid; grid-template-columns: minmax(170px, 2fr) repeat(3, minmax(110px, 1fr)) auto; gap: 8px; align-items: end; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
 .metric { padding: 15px; display: grid; gap: 8px; }
 .metric span { color: var(--muted); font-size: 13px; }
 .metric strong { font-size: 24px; }
@@ -195,9 +201,15 @@ td { font-size: 14px; }
 
 @media (max-width: 920px) {
   .app-shell { grid-template-columns: 1fr; }
-  .sidebar { position: static; }
-  .nav { grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); }
+  .sidebar { position: static; padding: 0; gap: 0; }
+  .sidebar .brand-block, .sidebar .user-box { display: none; }
+  .sidebar .nav { display: none; padding: 12px 14px 14px; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); background: #17211b; }
+  .sidebar.menu-open .nav { display: grid; }
+  .mobile-bar { display: grid; gap: 14px; }
+  .desktop-header { display: none; }
+  .menu-toggle { width: 100%; background: #17211b; color: #fff; text-align: left; border-radius: 8px; }
   .grid.cols-2, .grid.cols-3, .grid.cols-4, .pos-layout, .login-card { grid-template-columns: 1fr; }
+  .historical-line { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 640px) {
@@ -205,14 +217,14 @@ td { font-size: 14px; }
   h1 { font-size: 24px; }
   h2 { font-size: 19px; }
   .content { padding: 14px; }
-  .sidebar { padding: 14px; gap: 12px; }
-  .nav { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-  .nav button { padding: 9px 8px; min-height: 38px; }
+  .sidebar .nav { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .sidebar .nav button { padding: 9px 8px; min-height: 38px; }
   .toolbar { display: grid; grid-template-columns: 1fr; }
   .toolbar > * { min-width: 0; }
   .product-list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: none; }
   .product-button { min-height: 102px; padding: 12px; }
   .cart-line { grid-template-columns: 1fr; align-items: stretch; }
+  .historical-line { grid-template-columns: 1fr; }
   .cart-line input { max-width: none; }
   .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .actions button { width: 100%; }

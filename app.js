@@ -418,17 +418,17 @@ function seedState() {
   const products = [];
   return {
     settings: {
-      siteName: "PuntoNexo POS",
-      logoText: "PN",
-      tagline: "Plataforma comercial para ventas, caja e inventario",
-      institutionName: "NexoDigital Soluciones",
-      welcomeTitle: "PuntoNexo POS",
-      welcomeText: "Solucion web autogestionable para operacion comercial, inventario, caja, promociones y reportes.",
+      siteName: "7 Chakras",
+      logoText: "7C",
+      tagline: "Ventas, inventario y caja",
+      institutionName: "7 Chakras",
+      welcomeTitle: "Bienvenida a 7 Chakras",
+      welcomeText: "Accede al sistema de ventas, inventario y caja.",
       infoTitle: "Informacion general",
       infoText: "PuntoNexo POS es una aplicacion web desarrollada para optimizar el control interno de tiendas de productos varios mediante administracion de inventario, punto de venta, caja, usuarios, reportes y contenido informativo.",
       authorizationPin: "4321",
-      primaryColor: "#174f63",
-      accentColor: "#c46a2b"
+      primaryColor: "#6f3aa8",
+      accentColor: "#d36aa1"
     },
     announcements: [],
     users: [
@@ -797,6 +797,7 @@ function activeAuthTokens() {
 }
 
 function generateAuthToken() {
+  if (!can("admin", "supervisor")) return null;
   activeAuthTokens();
   const code = String(Math.floor(100000 + Math.random() * 900000));
   const token = {
@@ -866,10 +867,10 @@ function render() {
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand-block">
-          <div class="brand-row"><span class="logo-mark">${escapeHtml(siteSettings().logoText)}</span><strong>${escapeHtml(siteSettings().siteName)}</strong></div>
+          <div class="brand-row"><img class="brand-logo" src="logo-cliente-original.png" alt="Logo de 7 Chakras"><strong>${escapeHtml(siteSettings().siteName)}</strong></div>
           <span>${escapeHtml(siteSettings().tagline)}</span>
         </div>
-        <nav class="nav">
+        <nav class="nav" id="main-nav">
           ${items.map(item => `<button class="${currentView === item.id ? "active" : ""}" data-view="${item.id}">${item.label}</button>`).join("")}
         </nav>
         <div class="user-box">
@@ -879,7 +880,8 @@ function render() {
         </div>
       </aside>
       <main class="content">
-        ${viewHeader()}
+        <div class="mobile-bar"><button class="menu-toggle" id="menu-toggle" aria-expanded="false" aria-controls="main-nav">☰ Menú</button>${viewHeader()}</div>
+        <div class="desktop-header">${viewHeader()}</div>
         <section id="view-root"></section>
       </main>
     </div>
@@ -887,8 +889,14 @@ function render() {
   document.querySelectorAll("[data-view]").forEach(button => {
     button.addEventListener("click", () => {
       currentView = button.dataset.view;
+      document.querySelector(".sidebar")?.classList.remove("menu-open");
       render();
     });
+  });
+  document.querySelector("#menu-toggle")?.addEventListener("click", () => {
+    const sidebar = document.querySelector(".sidebar");
+    const open = sidebar.classList.toggle("menu-open");
+    document.querySelector("#menu-toggle").setAttribute("aria-expanded", String(open));
   });
   document.querySelector("#logout").addEventListener("click", logout);
   const root = document.querySelector("#view-root");
@@ -1514,7 +1522,7 @@ function notifyLowStockOnce(product) {
   }
 }
 
-function addMovement(product, type, before, change, after, reference) {
+function addMovement(product, type, before, change, after, reference, occurredAt = {}) {
   state.movements.unshift({
     id: uid("mov"),
     productId: product.id,
@@ -1523,8 +1531,8 @@ function addMovement(product, type, before, change, after, reference) {
     change,
     after,
     reference,
-    date: today(),
-    time: nowTime(),
+    date: occurredAt.date || today(),
+    time: occurredAt.time || nowTime(),
     userId: session.userId,
     createdAt: nowIso()
   });
@@ -1535,7 +1543,7 @@ function renderInventory(root) {
     <div class="panel">
       <div class="toolbar">
         <label>Buscar producto <input id="inventory-search" placeholder="Nombre, codigo o tipo"></label>
-        <button class="primary compact" id="new-product">Agregar producto</button>
+        ${can("admin", "supervisor") ? `<button class="primary compact" id="new-product">Agregar producto</button>` : ""}
         ${can("admin", "supervisor") ? `<button class="ghost compact" id="new-category">Nuevo tipo</button>` : ""}
         ${can("admin", "supervisor") ? `<button class="ghost compact" id="category-settings">Tipos y mayoreo</button>` : ""}
         ${can("admin", "supervisor") ? `<label><input id="show-inactive-products" type="checkbox"> Mostrar eliminados</label>` : ""}
@@ -1543,14 +1551,14 @@ function renderInventory(root) {
       <div id="inventory-table"></div>
     </div>
     ${can("admin", "supervisor") ? `
-    <div class="panel">
-      <h2>Historial de entradas y salidas</h2>
+    <details class="panel disclosure">
+      <summary>Historial de entradas y salidas</summary>
       ${movementTable(state.movements.slice(0, 30))}
-    </div>` : ""}
+    </details>` : ""}
   `;
   document.querySelector("#inventory-search").addEventListener("input", drawInventoryTable);
   document.querySelector("#show-inactive-products")?.addEventListener("change", drawInventoryTable);
-  document.querySelector("#new-product").addEventListener("click", () => productModal());
+  document.querySelector("#new-product")?.addEventListener("click", () => productModal());
   document.querySelector("#new-category")?.addEventListener("click", categoryModal);
   document.querySelector("#category-settings")?.addEventListener("click", categorySettingsModal);
   drawInventoryTable();
@@ -1583,7 +1591,7 @@ function productTable(products) {
       <td>${money.format(product.price)}</td>
       <td>${saleOptions(product).map(option => escapeHtml(option.name)).join(", ")}</td>
       <td><div class="actions">
-        ${product.active ? `<button class="tiny" data-stock-product="${product.id}">Entrada</button>` : ""}
+        ${product.active && can("admin", "supervisor") ? `<button class="tiny" data-stock-product="${product.id}">Ajustar existencias</button>` : ""}
         ${can("admin", "supervisor") ? `<button class="tiny" data-edit-product="${product.id}">Modificar</button><button class="tiny ${product.active ? "danger" : "warning"}" data-delete-product="${product.id}">${product.active ? "Eliminar" : "Restaurar"}</button>` : ""}
       </div></td>
     </tr>`).join("")}</tbody></table></div>`;
@@ -1594,7 +1602,7 @@ function productStockTable(products) {
 }
 
 function productModal(productId) {
-  if (!can("admin", "supervisor") && productId) return toast("Solo administracion puede editar productos");
+  if (!can("admin", "supervisor")) return toast("Solo administracion puede crear o editar productos");
   const product = normalizeProduct(state.products.find(item => item.id === productId) || {});
   const mode = isWeightProduct(product) ? "peso" : product.stockUnit === "paquete" ? "paquete" : "unidad";
   const presentationText = presentationsToText(product.salePresentations || []);
@@ -1749,6 +1757,7 @@ function productModal(productId) {
 }
 
 function stockModal(productId) {
+  if (!can("admin", "supervisor")) return toast("Solo administracion puede ajustar existencias");
   const product = state.products.find(item => item.id === productId);
   const isWeight = isWeightProduct(product);
   const baseWeightLabel = ({ kilogramo: "Kilogramos", gramo: "Gramos", miligramo: "Miligramos" })[product.stockUnit];
@@ -1832,6 +1841,7 @@ function stockModal(productId) {
 }
 
 function categorySettingsModal() {
+  if (!can("admin", "supervisor")) return toast("Solo administracion puede configurar tipos");
   showModal(`
     <h2>Tipos y mayoreo</h2>
     <p class="hint">El mayoreo por tipo aplica cuando la cuenta suma la cantidad minima entre productos del mismo tipo vendidos por unidad base.</p>
@@ -1853,6 +1863,7 @@ function categorySettingsModal() {
 }
 
 function categoryModal(categoryId = null) {
+  if (!can("admin", "supervisor")) return toast("Solo administracion puede modificar tipos");
   const category = normalizeCategory(state.categories.find(item => item.id === categoryId) || {});
   showModal(`
     <h2>${categoryId ? "Editar tipo de producto" : "Nuevo tipo de producto"}</h2>
@@ -1895,6 +1906,7 @@ function categoryModal(categoryId = null) {
 }
 
 function deleteProduct(productId) {
+  if (!can("admin", "supervisor")) return toast("Solo administracion puede eliminar productos");
   const product = state.products.find(item => item.id === productId);
   if (!product.active) {
     product.active = true;
@@ -1985,16 +1997,89 @@ function saveExpense(data, authUser) {
 function renderSales(root) {
   root.innerHTML = `
     <div class="panel">
-      <div class="toolbar">
-        <label>Fecha <input type="date" id="sales-date" value="${today()}"></label>
-        <label>Busqueda <input id="sales-search" placeholder="Folio, vendedor o producto"></label>
-      </div>
+      <div class="split"><h2>Ventas</h2>${can("admin") ? `<button class="primary compact" id="new-historical-sale">Agregar venta pasada</button>` : ""}</div>
+      <details class="disclosure" open>
+        <summary>Buscar y filtrar ventas</summary>
+        <div class="toolbar">
+          <label>Fecha <input type="date" id="sales-date" value="${today()}"></label>
+          <label>Busqueda <input id="sales-search" placeholder="Folio, vendedor o producto"></label>
+        </div>
+      </details>
       <div id="sales-table"></div>
     </div>
   `;
   document.querySelector("#sales-date").addEventListener("change", drawSales);
   document.querySelector("#sales-search").addEventListener("input", drawSales);
+  document.querySelector("#new-historical-sale")?.addEventListener("click", historicalSaleModal);
   drawSales();
+}
+
+function historicalSaleModal() {
+  if (!can("admin")) return toast("Solo el administrador puede registrar ventas pasadas");
+  const availableProducts = state.products.filter(product => product.active);
+  if (!availableProducts.length) return toast("Primero registra al menos un producto");
+  let lines = [{ productId: availableProducts[0].id, qty: 1, price: availableProducts[0].price || 0, cost: availableProducts[0].cost || 0 }];
+  const renderLines = () => {
+    document.querySelector("#historical-lines").innerHTML = lines.map((line, index) => `
+      <div class="historical-line" data-historical-line="${index}">
+        <label>Producto <select data-historical-product="${index}">${availableProducts.map(product => `<option value="${product.id}" ${product.id === line.productId ? "selected" : ""}>${escapeHtml(product.name)} (${unitLabel(product)})</option>`).join("")}</select></label>
+        <label>Cantidad <input data-historical-qty="${index}" type="number" min="0.001" step="0.001" value="${line.qty}"></label>
+        <label>Precio vendido <input data-historical-price="${index}" type="number" min="0" step="0.01" value="${line.price}"></label>
+        <label>Costo en esa fecha <input data-historical-cost="${index}" type="number" min="0" step="0.01" value="${line.cost}"></label>
+        <button type="button" class="tiny danger" data-remove-historical="${index}" ${lines.length === 1 ? "disabled" : ""}>Quitar</button>
+      </div>`).join("");
+    document.querySelectorAll("[data-historical-product]").forEach(input => input.addEventListener("change", event => {
+      const index = Number(event.target.dataset.historicalProduct);
+      const product = state.products.find(item => item.id === event.target.value);
+      lines[index] = { ...lines[index], productId: product.id, price: product.price || 0, cost: product.cost || 0 };
+      renderLines();
+    }));
+    [["qty", "data-historical-qty"], ["price", "data-historical-price"], ["cost", "data-historical-cost"]].forEach(([field, attribute]) => {
+      document.querySelectorAll(`[${attribute}]`).forEach(input => input.addEventListener("input", event => { lines[Number(event.target.getAttribute(attribute))][field] = Number(event.target.value || 0); }));
+    });
+    document.querySelectorAll("[data-remove-historical]").forEach(button => button.addEventListener("click", () => { lines.splice(Number(button.dataset.removeHistorical), 1); renderLines(); }));
+  };
+  showModal(`
+    <h2>Registrar venta pasada</h2>
+    <p class="hint">No modifica una caja abierta. Descuenta inventario y conserva el precio y costo indicados para calcular la ganancia histórica.</p>
+    <form id="historical-sale-form" class="stack">
+      <div class="grid cols-2">
+        <label>Fecha real <input name="date" type="date" max="${today()}" required value="${today()}"></label>
+        <label>Hora aproximada <input name="time" type="time" required value="${new Date().toTimeString().slice(0, 5)}"></label>
+        <label>Forma de pago <select name="paymentMethod"><option value="efectivo">Efectivo</option><option value="tarjeta">Tarjeta</option><option value="transferencia">Transferencia</option><option value="mixto">Mixto</option></select></label>
+        <label>Folio o nota <input name="ticketFolio" placeholder="Opcional"></label>
+      </div>
+      <div id="historical-lines" class="stack"></div>
+      <button type="button" class="ghost" id="add-historical-line">+ Agregar producto</button>
+      <details class="disclosure"><summary>Nota interna opcional</summary><label>Motivo o fuente <textarea name="note" placeholder="Ej. Venta capturada desde libreta del 8 de julio"></textarea></label></details>
+      <div class="actions"><button class="primary">Guardar venta pasada</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
+    </form>
+  `);
+  renderLines();
+  document.querySelector("#add-historical-line").addEventListener("click", () => { const product = availableProducts[0]; lines.push({ productId: product.id, qty: 1, price: product.price || 0, cost: product.cost || 0 }); renderLines(); });
+  document.querySelector("#historical-sale-form").addEventListener("submit", event => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.target));
+    const prepared = lines.map(line => ({ ...line, qty: Number(line.qty), price: Number(line.price), cost: Number(line.cost) }));
+    if (prepared.some(line => line.qty <= 0 || line.price < 0 || line.cost < 0)) return toast("Revisa cantidades, precios y costos");
+    const neededByProduct = prepared.reduce((totals, line) => ({ ...totals, [line.productId]: (totals[line.productId] || 0) + line.qty }), {});
+    const insufficient = Object.entries(neededByProduct).find(([productId, qty]) => state.products.find(product => product.id === productId).units < qty);
+    if (insufficient) return toast("No hay inventario suficiente para registrar esta venta; primero corrige existencias");
+    const items = prepared.map(line => {
+      const product = state.products.find(item => item.id === line.productId);
+      const consumption = consumeLotsDetailed(product, line.qty);
+      return { productId: product.id, name: product.name, code: product.code, qty: line.qty, stockQty: line.qty, optionId: "base", optionName: "Venta histórica", cost: line.cost, costTotal: line.cost * line.qty, costLayers: consumption.costLayers, price: line.price, subtotal: line.price * line.qty, profit: (line.price - line.cost) * line.qty, returnedQty: 0 };
+    });
+    const total = items.reduce((sum, item) => sum + item.subtotal, 0);
+    const sale = { id: uid("sale"), date: data.date, time: data.time, createdAt: nowIso(), recordedAt: nowIso(), userId: session.userId, cashId: null, historical: true, note: data.note.trim(), ticketFolio: data.ticketFolio.trim(), total, paid: total, change: 0, paymentMethod: data.paymentMethod, payments: [{ method: data.paymentMethod, amount: total, paid: total, change: 0, time: data.time }], status: "completada", items };
+    state.sales.unshift(sale);
+    items.forEach(item => { const product = state.products.find(product => product.id === item.productId); const before = product.units; product.units -= item.stockQty; addMovement(product, "Salida por venta histórica", before, -item.stockQty, product.units, sale.id, { date: data.date, time: data.time }); });
+    logOperation("venta_historica", "sales", sale.id, `Registro venta del ${data.date} por ${money.format(total)} con costo histórico`);
+    saveState();
+    closeModal();
+    render();
+    toast("Venta pasada registrada sin afectar caja");
+  });
 }
 
 function drawSales() {
@@ -2021,7 +2106,7 @@ function salesTable(sales, actions) {
   if (!sales.length) return `<p class="empty">No hay ventas para mostrar.</p>`;
   return `<div class="table-wrap"><table><thead><tr><th>Venta</th><th>Nota</th><th>Fecha</th><th>Hora</th><th>Vendedor</th><th>Total</th><th>Estado</th>${actions ? "<th>Acciones</th>" : ""}</tr></thead>
     <tbody>${sales.map(sale => `<tr>
-      <td>${sale.id.slice(0, 12)}</td><td>${escapeHtml(sale.ticketFolio || "-")}</td><td>${sale.date}</td><td>${sale.time}</td><td>${userName(sale.userId)}</td><td>${money.format(sale.total)}<br><small class="muted">${paymentLabel(sale)}</small></td><td><span class="badge ${sale.status === "cancelada" ? "danger" : sale.status === "parcialmente devuelta" ? "warn" : "ok"}">${sale.status}</span></td>
+      <td>${sale.id.slice(0, 12)}${sale.historical ? `<br><span class="badge warn">Histórica</span>` : ""}</td><td>${escapeHtml(sale.ticketFolio || "-")}</td><td>${sale.date}</td><td>${sale.time}</td><td>${userName(sale.userId)}</td><td>${money.format(sale.total)}<br><small class="muted">${paymentLabel(sale)}</small></td><td><span class="badge ${sale.status === "cancelada" ? "danger" : sale.status === "parcialmente devuelta" ? "warn" : "ok"}">${sale.status}</span></td>
       ${actions ? `<td><div class="actions"><button class="tiny" data-view-sale="${sale.id}">Ver</button><button class="tiny warning" data-return-sale="${sale.id}" ${sale.status === "cancelada" ? "disabled" : ""}>Devolucion</button>${can("admin", "supervisor") ? `<button class="tiny danger" data-cancel-sale="${sale.id}" ${sale.status === "cancelada" ? "disabled" : ""}>Cancelar</button>` : ""}</div></td>` : ""}
     </tr>`).join("")}</tbody></table></div>`;
 }
@@ -2067,6 +2152,7 @@ function authorizeModal(title, onSuccess) {
   });
 }
 function cancelSale(saleId, authUser) {
+  if (!can("admin", "supervisor")) return toast("No tienes permiso para cancelar ventas");
   const sale = state.sales.find(item => item.id === saleId);
   if (sale.status === "cancelada") return toast("La venta ya esta cancelada");
   sale.items.forEach(item => {
@@ -2711,6 +2797,7 @@ async function maybeAutoBackup() {
 }
 
 function restoreBackup() {
+  if (!isMaster()) return toast("Solo el Master puede restaurar respaldos");
   const file = document.querySelector("#restore-file").files[0];
   if (!file) return toast("Selecciona un archivo");
   if (!confirm("Restaurar un respaldo reemplazara la informacion actual del sistema. Confirma que tienes una copia reciente antes de continuar.")) return;
