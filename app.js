@@ -90,6 +90,30 @@ function authEmailForUsername(username = "") {
   return clean.includes("@") ? clean : `${clean}@${authEmailDomain}`;
 }
 
+async function resolveLoginEmail(username = "") {
+  const clean = String(username || "").trim().toLowerCase();
+  if (!clean || clean.includes("@") || !cloudMode) return authEmailForUsername(clean);
+  const client = getCloudClient();
+  const { data, error } = await client.rpc("resolve_pos_login", { login_name: clean });
+  if (!error && data) return data;
+  return authEmailForUsername(clean);
+}
+
+async function syncLoginAlias(previousUsername, user) {
+  if (!secureCloudAuth) return true;
+  const client = getCloudClient();
+  const { error } = await client.rpc("set_pos_login_alias", {
+    previous_username: previousUsername || user.username,
+    new_username: user.username,
+    login_email: user.authEmail || authEmailForUsername(user.username)
+  });
+  if (error) {
+    toast("No se pudo actualizar el usuario de acceso. Intenta de nuevo.");
+    return false;
+  }
+  return true;
+}
+
 function seedUser(user) {
   const normalized = { ...user, authEmail: user.authEmail || authEmailForUsername(user.username) };
   if (secureCloudAuth) delete normalized.password;
@@ -964,7 +988,7 @@ async function handleLogin(event) {
 
 async function loginWithSupabase(username, password) {
   const client = getCloudClient();
-  const email = authEmailForUsername(username);
+  const email = await resolveLoginEmail(username);
   if (!client || !email) return toast("Configuracion de nube incompleta");
   const { data, error } = await client.auth.signInWithPassword({ email, password });
   if (error) return toast("Usuario o contrasena incorrectos");
@@ -2610,7 +2634,7 @@ function userModal(userId) {
         <div class="grid cols-2" id="user-access-list">
           ${VIEW_ACCESS.map(item => `<label><input type="checkbox" name="access" value="${item.id}" ${selectedAccess[item.id] ? "checked" : ""} ${targetIsMaster ? "disabled" : ""}> ${item.label}</label>`).join("")}
         </div>
-        <p class="hint">${secureCloudAuth ? "Crea tambien este correo en Supabase Authentication. La contrasena se administra en Supabase, no en este sistema." : "Autorizaciones permite generar tokens y autorizar operaciones con usuario y contrasena."}</p>
+        <p class="hint">${secureCloudAuth ? "El usuario de acceso puede cambiarse sin modificar este correo ni la contrasena de Supabase." : "Autorizaciones permite generar tokens y autorizar operaciones con usuario y contrasena."}</p>
       </div>
       <div class="actions"><button class="primary">Guardar</button><button type="button" class="ghost" data-close-modal>Cancelar</button></div>
     </form>
@@ -2622,7 +2646,7 @@ function userModal(userId) {
       input.checked = Boolean(defaults[input.value]);
     });
   });
-  form.addEventListener("submit", event => {
+  form.addEventListener("submit", async event => {
     event.preventDefault();
     const formData = new FormData(event.target);
     const data = Object.fromEntries(formData);
@@ -2634,6 +2658,9 @@ function userModal(userId) {
       ? { ...DEFAULT_ACCESS.master }
       : Object.fromEntries(VIEW_ACCESS.map(item => [item.id, selected.includes(item.id)]));
     if (role !== "admin") access.users = false;
+    const previousUsername = userId ? user.username : "";
+    const aliasData = { username: data.username, authEmail: data.authEmail || authEmailForUsername(data.username) };
+    if (secureCloudAuth && !await syncLoginAlias(previousUsername, aliasData)) return;
     if (userId) {
       const update = { name: data.name, username: data.username, authEmail: data.authEmail || authEmailForUsername(data.username), role, access };
       if (!secureCloudAuth) update.password = data.password;
