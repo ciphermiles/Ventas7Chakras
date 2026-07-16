@@ -39,8 +39,9 @@ const serverMode = location.protocol === "http:" || location.protocol === "https
 const cloudConfig = window.PUNTONEXO_CLOUD || {};
 const cloudMode = Boolean(cloudConfig.enabled && cloudConfig.supabaseUrl && cloudConfig.supabaseAnonKey && window.supabase);
 const secureCloudAuth = Boolean(cloudMode && cloudConfig.authMode === "supabase");
-const cloudBusinessId = cloudConfig.businessId || "default-store";
-const authEmailDomain = cloudConfig.authEmailDomain || `${cloudBusinessId}.pos.local`;
+// Esta instalación es exclusiva de 7 Chakras: no crea ni administra otras tiendas.
+const cloudBusinessId = "tienda-principal";
+const authEmailDomain = "ventas7chakras.local";
 let cloudClient = null;
 let cloudChannel = null;
 let accessKey = sessionStorage.getItem("posAccessKey") || "";
@@ -59,7 +60,7 @@ function uid(prefix) {
 }
 
 function today() {
-  return new Date().tolocalDateString("en-CA");
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/Mexico_City" });
 }
 
 function nowTime() {
@@ -967,7 +968,11 @@ async function loginWithSupabase(username, password) {
   if (!client || !email) return toast("Configuracion de nube incompleta");
   const { data, error } = await client.auth.signInWithPassword({ email, password });
   if (error) return toast("Usuario o contrasena incorrectos");
-  await syncStateFromCloud();
+  const loaded = await syncStateFromCloud();
+  if (!loaded) {
+    await client.auth.signOut();
+    return toast("No se pudieron cargar los datos de la nube. Revisa Supabase.");
+  }
   let user = state.users.find(item =>
     item.authUserId === data.user.id ||
     String(item.authEmail || "").toLowerCase() === email ||
@@ -989,6 +994,7 @@ async function loginWithSupabase(username, password) {
     user.authEmail = user.authEmail || email;
     saveState();
   }
+  connectCloudRealtime();
   startSessionForUser(user);
   maybeAutoBackup();
 }
@@ -1003,8 +1009,9 @@ function startSessionForUser(user) {
 }
 
 function logout() {
-  if (openCash()) {
-    toast("Debes cerrar caja y realizar corte antes de cerrar sesion");
+  const cash = openCash();
+  if (cash) {
+    toast(`Hay una caja abierta desde ${cash.dateOpen} ${cash.timeOpen}. Debes cerrarla antes de salir.`);
     currentView = "cash";
     render();
     return;
@@ -2866,8 +2873,10 @@ function toast(message) {
 }
 
 render();
-syncStateFromServer();
-connectRealtime();
+if (!secureCloudAuth) {
+  syncStateFromServer();
+  connectRealtime();
+}
 
 window.addEventListener("beforeunload", event => {
   if (session && openCash()) {
